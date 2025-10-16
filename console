@@ -1,0 +1,38 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Ajo\Console;
+use Ajo\Context;
+use Ajo\Database;
+use Ajo\Test;
+use Ajo\Job;
+
+require __DIR__ . '/vendor/autoload.php';
+
+$cli = Console::create();
+
+$cli->use(fn () => Context::set('db', Database::get()));
+
+Job::register($cli);
+
+Job::schedule('* * * * *', function () {
+    Console::info('Enviando emails pendientes...');
+})
+    ->name('emails.send')
+    ->queue('emails')
+    ->concurrency(3)
+    ->priority(10);
+
+Job::schedule('0 2 * * *', function () {
+    Console::info('Reporte diario...');
+    // ...
+})
+    ->name('report.daily')
+    ->queue('reports')
+    ->priority(50);
+
+Test::register($cli, __DIR__ . '/tests');
+
+exit($cli->dispatch());

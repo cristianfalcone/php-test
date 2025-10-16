@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_ENV: ${APP_ENV:-production}
+    env_file: [ .env ]
+    environment:
+      TZ: ${TZ:-America/Argentina/Buenos_Aires}
+      UID: ${UID:-1000}
+      GID: ${GID:-1000}
+    volumes:
+      - ./:/var/www
+      - ./docker/php/php.ini:/usr/local/etc/php/php.ini:ro
+    networks: [ web, db ]
+    depends_on: [ db ]
+
+  web:
+    image: nginx:1.27-alpine
+    depends_on: [ app ]
+    ports:
+      - "${HTTP_PORT:-8082}:80"
+    volumes:
+      - ./:/var/www:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [ web ]
+    environment:
+      TZ: ${TZ:-America/Argentina/Buenos_Aires}
+
+  db:
+    image: mysql:8.0
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_DATABASE:-app}
+      MYSQL_USER: ${DB_USER:-appuser}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-apppass}
+      TZ: ${TZ:-America/Argentina/Buenos_Aires}
+    volumes:
+      - data:/var/lib/mysql
+    networks: [ db ]
+
+  adminer:
+    image: adminer:latest
+    depends_on: [ db ]
+    ports:
+      - "${ADMINER_PORT:-8083}:8080"
+    networks: [ db ]
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+      TZ: ${TZ:-America/Argentina/Buenos_Aires}
+
+networks:
+  web: {}
+  db: {}
+
+volumes:
+  data: {}

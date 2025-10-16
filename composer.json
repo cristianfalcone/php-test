@@ -1,0 +1,40 @@
+{
+  "name": "cristianfacone/php-test",
+  "type": "library",
+  "description": "An extremely fast and lightweight micro framework for PHP",
+  "keywords": [],
+  "homepage": "https://github.com/cristianfacone/php-test",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Cristian Facone",
+      "email": "cristianfacone@gmail.com",
+      "homepage": "https://cristianfacone.com",
+      "role": "Developer"
+    }
+  ],
+  "require": {
+    "php": "^8.2",
+    "ext-intl": "*",
+    "ext-pcntl": "*",
+    "ext-pdo_mysql": "*"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "Ajo\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Ajo\\Tests\\": "tests/"
+    }
+  },
+  "bin": [
+    "console"
+  ],
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}
