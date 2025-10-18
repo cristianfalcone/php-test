@@ -40,7 +40,7 @@ final class Database
         try {
             self::$pdo = new PDO($dsn, $user, $password, $options);
         } catch (PDOException $e) {
-            throw new RuntimeException('No se pudo establecer la conexión a la base de datos.', 0, $e);
+            throw new RuntimeException($e->getMessage(), 0, $e);
         }
 
         return self::$pdo;

@@ -1,0 +1,180 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Ajo\Tests\Support\Console;
+
+use Ajo\Console;
+use Ajo\Core\Console as CoreConsole;
+use ReflectionClass;
+
+/**
+ * Ejecuta un comando y devuelve código de salida, stdout y stderr capturados.
+ *
+ * @return array{0:int,1:string,2:string}
+ */
+function dispatch(
+    CoreConsole $cli,
+    string $command,
+    array $arguments = [],
+    bool $captureStreams = true
+): array {
+    [$stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors] = statics();
+
+    $snapshot = snapshot($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors, $cli);
+
+    $hadArgv = array_key_exists('argv', $GLOBALS);
+    $previousArgv = $hadArgv ? $GLOBALS['argv'] : null;
+    $GLOBALS['argv'] = array_merge(['console', $command], $arguments);
+
+    $previous = Console::instance();
+    Console::swap($cli);
+
+    $stdout = null;
+    $stderr = null;
+    $output = ['', ''];
+    $exitCode = 0;
+
+    try {
+        if ($captureStreams) {
+            $stdout = fopen('php://temp', 'w+');
+            $stderr = fopen('php://temp', 'w+');
+
+            $exitCode = $cli->dispatch($command, $arguments, $stdout, $stderr);
+        } else {
+            $stdout = fopen('php://temp', 'w+');
+            $stderr = fopen('php://temp', 'w+');
+
+            $stdoutProp->setValue($cli, $stdout);
+            $stderrProp->setValue($cli, $stderr);
+            $ownsStdout->setValue($cli, false);
+            $ownsStderr->setValue($cli, false);
+            $supportsColors->setValue($cli, false);
+
+            $exitCode = $cli->dispatch($command, $arguments);
+        }
+
+        if (is_resource($stdout) && is_resource($stderr)) {
+            $output = readAndClose([$stdout, $stderr]);
+            $stdout = $stderr = null;
+        }
+
+        return [$exitCode, $output[0], $output[1]];
+    } finally {
+        Console::swap($previous);
+
+        if (is_resource($stdout)) fclose($stdout);
+        if (is_resource($stderr)) fclose($stderr);
+
+        restore($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors, $snapshot, $cli);
+
+        if ($hadArgv) {
+            $GLOBALS['argv'] = $previousArgv;
+        } else {
+            unset($GLOBALS['argv']);
+        }
+    }
+}
+
+/**
+ * Ejecuta un callback silenciando stdout/stderr de Console.
+ *
+ * @return array{0:string,1:string} contenidos capturados
+ */
+function silence(callable $callback): array
+{
+    $console = Console::instance();
+
+    [$stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors] = statics();
+    $snapshot = snapshot($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors, $console);
+
+    $stdout = fopen('php://temp', 'w+');
+    $stderr = fopen('php://temp', 'w+');
+
+    $stdoutProp->setValue($console, $stdout);
+    $stderrProp->setValue($console, $stderr);
+    $ownsStdout->setValue($console, false);
+    $ownsStderr->setValue($console, false);
+    $supportsColors->setValue($console, false);
+
+    try {
+        $callback();
+    } finally {
+        restore($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors, $snapshot, $console);
+    }
+
+    return readAndClose([$stdout, $stderr]);
+}
+
+/**
+ * @return array{0:\ReflectionProperty,1:\ReflectionProperty,2:\ReflectionProperty,3:\ReflectionProperty,4:\ReflectionProperty}
+ */
+function statics(): array
+{
+    $reflection = new ReflectionClass(CoreConsole::class);
+
+    $stdout = $reflection->getProperty('stdout'); $stdout->setAccessible(true);
+    $stderr = $reflection->getProperty('stderr'); $stderr->setAccessible(true);
+    $ownsStdout = $reflection->getProperty('ownsStdout'); $ownsStdout->setAccessible(true);
+    $ownsStderr = $reflection->getProperty('ownsStderr'); $ownsStderr->setAccessible(true);
+    $supports = $reflection->getProperty('supportsColors'); $supports->setAccessible(true);
+
+    return [$stdout, $stderr, $ownsStdout, $ownsStderr, $supports];
+}
+
+/**
+ * @param \ReflectionProperty ...$properties
+ * @return array<string,mixed>
+ */
+function snapshot(
+    \ReflectionProperty $stdout,
+    \ReflectionProperty $stderr,
+    \ReflectionProperty $ownsStdout,
+    \ReflectionProperty $ownsStderr,
+    \ReflectionProperty $supports,
+    CoreConsole $console
+): array {
+    return [
+        'stdout' => $stdout->getValue($console),
+        'stderr' => $stderr->getValue($console),
+        'ownsStdout' => $ownsStdout->getValue($console),
+        'ownsStderr' => $ownsStderr->getValue($console),
+        'supports' => $supports->getValue($console),
+    ];
+}
+
+/**
+ * @param array{stdout:mixed,stderr:mixed,ownsStdout:mixed,ownsStderr:mixed,supports:mixed} $snapshot
+ */
+function restore(
+    \ReflectionProperty $stdout,
+    \ReflectionProperty $stderr,
+    \ReflectionProperty $ownsStdout,
+    \ReflectionProperty $ownsStderr,
+    \ReflectionProperty $supports,
+    array $snapshot,
+    CoreConsole $console
+): void {
+    $stdout->setValue($console, $snapshot['stdout']);
+    $stderr->setValue($console, $snapshot['stderr']);
+    $ownsStdout->setValue($console, $snapshot['ownsStdout']);
+    $ownsStderr->setValue($console, $snapshot['ownsStderr']);
+    $supports->setValue($console, $snapshot['supports']);
+}
+
+/**
+ * @param array<int, resource> $streams
+ * @return array{0:string,1:string}
+ */
+function readAndClose(array $streams): array
+{
+    $contents = [];
+
+    foreach ($streams as $stream) {
+        rewind($stream);
+        $contents[] = stream_get_contents($stream) ?: '';
+        fclose($stream);
+    }
+
+    return [$contents[0] ?? '', $contents[1] ?? ''];
+}

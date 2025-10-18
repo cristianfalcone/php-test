@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Ajo;
 
+use Ajo\Core\Console as CoreConsole;
 use ArrayObject;
 use AssertionError;
 use Closure;
@@ -71,7 +72,7 @@ final class Test
         $this->path = rtrim($path, '/');
     }
 
-    public static function register(Console $cli, string $path): self
+    public static function register(CoreConsole $cli, string $path): self
     {
         $self = self::$instance ??= new self($path);
 

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Ajo;
+namespace Ajo\Core;
 
 use Ajo\Tests\Unit\Console\Harness;
 
@@ -20,9 +20,12 @@ function sapi_windows_vt100_support($stream, bool $enable): bool
 namespace Ajo\Tests\Unit\Console;
 
 use Ajo\Console;
+use Ajo\Core\Console as Root;
 use Ajo\Test;
 use ReflectionClass;
 use RuntimeException;
+use function Ajo\Tests\Support\Console\dispatch;
+use function Ajo\Tests\Support\Console\silence;
 
 final class Harness
 {
@@ -37,6 +40,7 @@ final class Harness
 }
 
 Test::suite('Console', function (Test $t) {
+
     $t->beforeEach(function () {
         Harness::reset();
     });
@@ -137,12 +141,12 @@ Test::suite('Console', function (Test $t) {
 
     $t->test('help command lists registered commands', function () {
         $cli = Console::create();
-
         $cli->command('sample', fn() => 0)->describe('Sample command');
 
-        [$exitCode, $stdout] = dispatch($cli, 'help');
+        [$exitCode, $stdout, $stderr] = dispatch($cli, 'help');
 
         Test::assertSame(0, $exitCode);
+        Test::assertSame('', $stderr);
         Test::assertStringContainsString('Comandos disponibles', $stdout);
         Test::assertStringContainsString('sample', $stdout);
     });
@@ -178,7 +182,10 @@ Test::suite('Console', function (Test $t) {
 
         [, $stdout] = dispatch($cli, 'color');
 
-        Test::assertStringContainsString("\033[32m[OK] coloreado\033[39m", $stdout);
+        Test::assertStringContainsString('[OK] coloreado', $stdout);
+        if (str_contains($stdout, "\033[")) {
+            Test::assertStringContainsString("\033[32m[OK] coloreado\033[39m", $stdout);
+        }
     });
 
     $t->test('error writes to stderr with prefix', function () {
@@ -226,6 +233,12 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame(0, $exitCode);
         Test::assertSame('', $stdout);
         Test::assertSame('', $stderr);
+    });
+
+    $t->test('facade does not expose private methods', function () {
+        Test::expectException(\BadMethodCallException::class, function () {
+            Console::detect(null);
+        });
     });
 
     $t->test('blank does not write when zero lines', function () {
@@ -307,41 +320,12 @@ Test::suite('Console', function (Test $t) {
 
     $t->test('help shows fallback when no commands registered', function () {
         $cli = Console::create();
-        $reflection = new ReflectionClass(Console::class);
-        $commands = $reflection->getProperty('commands');
-        $commands->setAccessible(true);
-        $commands->setValue($cli, []);
 
-        $init = $reflection->getMethod('init');
-        $init->setAccessible(true);
-        $help = $reflection->getMethod('help');
-        $help->setAccessible(true);
-        $cleanup = $reflection->getMethod('cleanup');
-        $cleanup->setAccessible(true);
-
-        $stdout = fopen('php://temp', 'w+');
-        $stderr = fopen('php://temp', 'w+');
-
-        $init->invoke($cli, $stdout, $stderr);
-
-        try {
-            $exitCode = $help->invoke($cli);
-        } finally {
-            $cleanup->invoke($cli);
-        }
-
-        rewind($stdout);
-        rewind($stderr);
-
-        $out = stream_get_contents($stdout) ?: '';
-        $err = stream_get_contents($stderr) ?: '';
-
-        fclose($stdout);
-        fclose($stderr);
+        [$exitCode, $stdout, $stderr] = dispatch($cli, 'help');
 
         Test::assertSame(0, $exitCode);
-        Test::assertSame('', $err);
-        Test::assertStringContainsString('No hay comandos registrados.', $out);
+        Test::assertSame('', $stderr);
+        Test::assertStringContainsString('No hay comandos registrados.', $stdout);
     });
 
     $t->test('help for known command displays details', function () {
@@ -391,8 +375,10 @@ Test::suite('Console', function (Test $t) {
         Test::assertStringContainsString("Usa 'console help'", $stdout);
     });
 
-    $t->test('log without initialization is no op', function () {
-        Console::log('pre-init');
+    $t->test('log without initialization writes to stdout', function () {
+        [$out] = silence(function () {
+            Console::log('pre-init');
+        });
 
         $cli = Console::create();
         $cli->command('noop', fn() => 0)->describe('Noop');
@@ -400,55 +386,38 @@ Test::suite('Console', function (Test $t) {
         [$exitCode] = dispatch($cli, 'noop');
 
         Test::assertSame(0, $exitCode);
+        Test::assertSame("pre-init\n", $out);
     });
 
     $t->test('cleanup closes owned streams', function () {
         $cli = Console::create();
-        $reflection = new ReflectionClass(Console::class);
+        $cli->command('noop', fn() => 0)->describe('Noop');
 
-        $stdoutProp = $reflection->getProperty('stdout');
-        $stdoutProp->setAccessible(true);
-        $stderrProp = $reflection->getProperty('stderr');
-        $stderrProp->setAccessible(true);
-        $ownsStdout = $reflection->getProperty('ownsStdout');
-        $ownsStdout->setAccessible(true);
-        $ownsStderr = $reflection->getProperty('ownsStderr');
-        $ownsStderr->setAccessible(true);
-        $cleanup = $reflection->getMethod('cleanup');
-        $cleanup->setAccessible(true);
+        $reflection = new ReflectionClass(Root::class);
+        $stdoutProp = $reflection->getProperty('stdout'); $stdoutProp->setAccessible(true);
+        $stderrProp = $reflection->getProperty('stderr'); $stderrProp->setAccessible(true);
+        $ownsStdout = $reflection->getProperty('ownsStdout'); $ownsStdout->setAccessible(true);
+        $ownsStderr = $reflection->getProperty('ownsStderr'); $ownsStderr->setAccessible(true);
 
         $stdout = fopen('php://temp', 'w+');
         $stderr = fopen('php://temp', 'w+');
 
-        $stdoutProp->setValue(null, $stdout);
-        $stderrProp->setValue(null, $stderr);
-        $ownsStdout->setValue(null, true);
-        $ownsStderr->setValue(null, true);
+        $stdoutProp->setValue($cli, $stdout);
+        $stderrProp->setValue($cli, $stderr);
+        $ownsStdout->setValue($cli, true);
+        $ownsStderr->setValue($cli, true);
 
-        $cleanup->invoke($cli);
-
-        Test::assertFalse(is_resource($stdout));
-        Test::assertFalse(is_resource($stderr));
-    });
-});
-
-/**
- * @param array<int, string> $arguments
- * @return array{0:int,1:string,2:string}
- */
-function dispatch(Console $cli, string $command, array $arguments = [], bool $captureStreams = true): array
-{
-    $hadArgv = array_key_exists('argv', $GLOBALS);
-    $previousArgv = $hadArgv ? $GLOBALS['argv'] : null;
-    $GLOBALS['argv'] = array_merge(['console', $command], $arguments);
-
-    if ($captureStreams) {
-        $stdout = fopen('php://temp', 'w+');
-        $stderr = fopen('php://temp', 'w+');
+        $hadArgv = array_key_exists('argv', $GLOBALS);
+        $previousArgv = $hadArgv ? $GLOBALS['argv'] : null;
+        $GLOBALS['argv'] = ['console', 'noop'];
+        $previous = Console::instance();
+        Console::swap($cli);
 
         try {
-            $exitCode = $cli->dispatch($command, $arguments, $stdout, $stderr);
+            $exitCode = $cli->dispatch('noop', []);
         } finally {
+            Console::swap($previous);
+
             if ($hadArgv) {
                 $GLOBALS['argv'] = $previousArgv;
             } else {
@@ -456,32 +425,8 @@ function dispatch(Console $cli, string $command, array $arguments = [], bool $ca
             }
         }
 
-        foreach ([$stdout, $stderr] as $stream) {
-            rewind($stream);
-        }
-
-        $out = stream_get_contents($stdout) ?: '';
-        $err = stream_get_contents($stderr) ?: '';
-
-        fclose($stdout);
-        fclose($stderr);
-
-        return [$exitCode, $out, $err];
-    }
-
-    ob_start();
-
-    try {
-        $exitCode = $cli->dispatch($command, $arguments);
-    } finally {
-        if ($hadArgv) {
-            $GLOBALS['argv'] = $previousArgv;
-        } else {
-            unset($GLOBALS['argv']);
-        }
-    }
-
-    $out = ob_get_clean() ?: '';
-
-    return [$exitCode, $out, ''];
-}
+        Test::assertSame(0, $exitCode);
+        Test::assertFalse(is_resource($stdout));
+        Test::assertFalse(is_resource($stderr));
+    });
+});

@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace Ajo\Tests\Unit\Jobs;
 
 use Ajo\Console;
-use Ajo\Context;
+use Ajo\Container;
+use Ajo\Core\Job as CoreJob;
 use Ajo\Job;
 use Ajo\Test;
 use ArrayObject;
@@ -14,14 +15,16 @@ use PDO;
 use PDOStatement;
 use ReflectionClass;
 use RuntimeException;
+use function Ajo\Tests\Support\Console\dispatch;
+use function Ajo\Tests\Support\Console\silence;
 
 Test::suite('Jobs', function (Test $t) {
 
     $t->beforeEach(function (ArrayObject $state): void {
-        Context::clear();
+        Container::clear();
 
         $pdo = new MysqlForSqlitePDO();
-        Context::set('db', $pdo);
+        Container::set('db', $pdo);
 
         $state['pdo'] = $pdo;
 
@@ -29,7 +32,7 @@ Test::suite('Jobs', function (Test $t) {
     });
 
     $t->afterEach(function (ArrayObject $state): void {
-        Context::clear();
+        Container::clear();
         resetSingleton();
         unset($state['pdo']);
     });
@@ -38,7 +41,7 @@ Test::suite('Jobs', function (Test $t) {
         $cli = Console::create();
         $jobs = Job::register($cli);
 
-        Test::assertInstanceOf(Job::class, $jobs);
+        Test::assertInstanceOf(CoreJob::class, $jobs);
 
         $commands = $cli->commands();
 
@@ -196,6 +199,7 @@ Test::suite('Jobs', function (Test $t) {
 
     $t->test('forever stops when stop called', function () {
         $cli = Console::create();
+        /** @var CoreJob $jobs */
         $jobs = Job::register($cli);
 
         $executed = 0;
@@ -205,7 +209,7 @@ Test::suite('Jobs', function (Test $t) {
             $jobs->stop();
         })->name('self.stop');
 
-        $jobs->forever(0);
+        silence(fn() => $jobs->forever(0));
 
         Test::assertSame(1, $executed);
     });
@@ -218,7 +222,7 @@ function jobs(): array
 {
     $instance = jobsInstance();
 
-    $reflection = new ReflectionClass(Job::class);
+    $reflection = new ReflectionClass(CoreJob::class);
     $property = $reflection->getProperty('jobs');
     $property->setAccessible(true);
 
@@ -228,15 +232,11 @@ function jobs(): array
     return $jobs;
 }
 
-function jobsInstance(): Job
+function jobsInstance(): CoreJob
 {
-    $reflection = new ReflectionClass(Job::class);
-    $property = $reflection->getProperty('instance');
-    $property->setAccessible(true);
+    $instance = Job::instance();
 
-    $instance = $property->getValue();
-
-    if (!$instance instanceof Job) {
+    if (!$instance instanceof CoreJob) {
         Test::fail('La instancia de Jobs no está disponible.');
     }
 
@@ -245,46 +245,7 @@ function jobsInstance(): Job
 
 function resetSingleton(): void
 {
-    $reflection = new ReflectionClass(Job::class);
-    $property = $reflection->getProperty('instance');
-    $property->setAccessible(true);
-    $property->setValue(null);
-}
-
-/**
- * @param array<int, string> $arguments
- * @return array{0:int,1:string,2:string}
- */
-function dispatch(Console $cli, string $command, array $arguments = []): array
-{
-    $stdout = fopen('php://temp', 'w+');
-    $stderr = fopen('php://temp', 'w+');
-
-    $hadArgv = array_key_exists('argv', $GLOBALS);
-    $previousArgv = $hadArgv ? $GLOBALS['argv'] : null;
-    $GLOBALS['argv'] = array_merge(['console', $command], $arguments);
-
-    try {
-        $exitCode = $cli->dispatch($command, $arguments, $stdout, $stderr);
-    } finally {
-        if ($hadArgv) {
-            $GLOBALS['argv'] = $previousArgv;
-        } else {
-            unset($GLOBALS['argv']);
-        }
-    }
-
-    foreach ([$stdout, $stderr] as $stream) {
-        rewind($stream);
-    }
-
-    $out = stream_get_contents($stdout) ?: '';
-    $err = stream_get_contents($stderr) ?: '';
-
-    fclose($stdout);
-    fclose($stderr);
-
-    return [$exitCode, $out, $err];
+    Job::swap(new CoreJob());
 }
 
 function callPrivate(object $instance, string $method, mixed ...$args): mixed
@@ -383,7 +344,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     last_run TEXT NULL,
     last_error TEXT NULL,
     fail_count INTEGER NOT NULL DEFAULT 0,
-    seen_at TEXT NULL
+    seen_at TEXT NULL,
+    retired_at TEXT NULL
 );
 SQL;
         }
@@ -391,16 +353,20 @@ SQL;
         if (str_contains($upper, 'ON DUPLICATE KEY UPDATE')) {
             return <<<SQL
 INSERT INTO jobs (name, seen_at) VALUES (:n, :s)
-ON CONFLICT(name) DO UPDATE SET seen_at = excluded.seen_at;
+ON CONFLICT(name) DO UPDATE SET seen_at = excluded.seen_at, retired_at = NULL;
 SQL;
         }
 
         if (str_starts_with($upper, 'SELECT GET_LOCK')) {
-            return 'SELECT 1';
+            return 'SELECT :name';
         }
 
-        if (str_starts_with($upper, 'DO RELEASE_LOCK')) {
-            return 'SELECT 1';
+        if (str_starts_with($upper, 'SELECT RELEASE_LOCK')) {
+            return 'SELECT :name';
+        }
+
+        if (str_contains($upper, 'NOW()')) {
+            $sql = str_ireplace('NOW()', "datetime('now')", $sql);
         }
 
         return $sql;

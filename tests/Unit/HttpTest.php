@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Ajo;
+namespace Ajo\Core;
 
 use Ajo\Tests\Unit\Http\TestHarness;
 
@@ -26,6 +26,7 @@ function header(string $header, bool $replace = true, ?int $response_code = null
 
 namespace Ajo\Tests\Unit\Http;
 
+use Ajo\Core\Http as Root;
 use Ajo\Http;
 use Ajo\Test;
 use BadMethodCallException;
@@ -54,7 +55,7 @@ Test::suite('Http', function (Test $t) {
     });
 
     $t->test('create returns http instance', function () {
-        Test::assertInstanceOf(Http::class, Http::create());
+        Test::assertInstanceOf(Root::class, Http::create());
     });
 
     $t->test('global middleware runs before route handler', function () {
@@ -175,7 +176,7 @@ Test::suite('Http', function (Test $t) {
     $t->test('dispatch uses custom exception handler', function () {
 
         $caught = null;
-        $http = new Http(
+        $http = new Root(
             null,
             function (Throwable $throwable) use (&$caught): array {
                 $caught = $throwable;
@@ -304,7 +305,7 @@ Test::suite('Http', function (Test $t) {
 /**
  * @return array{0:string,1:int,2:array<int, array{0:string,1:bool,2:?int}>}
  */
-function dispatch(Http $http, string $method, string $target): array
+function dispatch(Root $http, string $method, string $target): array
 {
     TestHarness::reset();
 

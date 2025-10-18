@@ -388,7 +388,7 @@ PHP;
 
     private function pdo()
     {
-        $pdo = Context::get('db');
+        $pdo = Container::get('db');
         if (!$pdo instanceof PDO) throw new RuntimeException('No hay conexión a la base de datos.');
         return $pdo;
     }
