@@ -10,7 +10,7 @@ use JsonException;
 use Throwable;
 
 /**
- * Router sin dependencias con middlewares, coincidencia por prefijo y helpers JSON.
+ * Dependency-free router with middlewares, prefix matching and JSON helpers.
  */
 final class Http extends Router
 {
@@ -20,12 +20,12 @@ final class Http extends Router
     private array $routes = [];
 
     /**
-     * Registra una ruta en el enrutador.
+     * Registers a route in the router.
      */
     public function map(array|string $methods, string $path, callable ...$handlers)
     {
         if ($handlers === []) {
-            throw new InvalidArgumentException('Definir una ruta requiere al menos un manejador.');
+            throw new InvalidArgumentException('Defining a route requires at least one handler.');
         }
 
         $wrapped = array_map(fn($handler) => $this->adapt($handler), $handlers);
@@ -45,14 +45,14 @@ final class Http extends Router
         $method = strtoupper($name);
 
         if (!in_array($method, self::METHODS, true)) {
-            throw new BadMethodCallException("Método '{$name}' no soportado.");
+            throw new BadMethodCallException("Method '{$name}' not supported.");
         }
 
         return $this->map($method, ...$arguments);
     }
 
     /**
-     * Detecta y ejecuta la ruta correspondiente
+     * Detects and executes the corresponding route
      */
     public function dispatch(?string $method = null, ?string $target = null)
     {
@@ -103,26 +103,23 @@ final class Http extends Router
             echo json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         } catch (JsonException) {
             http_response_code(500);
-            echo json_encode(['ok' => false, 'error' => 'error_codificacion'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            echo json_encode(['ok' => false, 'error' => 'encoding_error'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
     }
 
     protected function defaultNotFound(): callable
     {
-        return fn() => ['ok' => false, 'error' => 'no_encontrado', 'status' => 404];
+        return fn() => ['ok' => false, 'error' => 'not_found', 'status' => 404];
     }
 
     protected function defaultException(): callable
     {
-        return fn(Throwable $e) => ['ok' => false, 'error' => 'error_interno', 'message' => $e->getMessage(), 'status' => 500];
+        return fn(Throwable $e) => ['ok' => false, 'error' => 'internal_error', 'message' => $e->getMessage(), 'status' => 500];
     }
 
     protected function matches(string $prefix, string $path): bool
     {
-        if ($prefix === '' || $path === $prefix) {
-            return true;
-        }
-
+        if ($prefix === '' || $path === $prefix) return true;
         return str_starts_with($path, $prefix . '/');
     }
 

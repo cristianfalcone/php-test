@@ -11,12 +11,14 @@ use ReflectionMethod;
 use Throwable;
 
 /**
- * CLI minimalista con middlewares y estilos ANSI.
+ * Minimalist CLI with middlewares and ANSI styles.
  *
- * Ejemplo:
+ * Example:
+ * ```php
  *   $cli = Console::create();
  *   $cli->command('ping', fn() => Console::success('pong'));
  *   exit($cli->dispatch());
+ * ```
  */
 final class Console extends Router
 {
@@ -84,7 +86,7 @@ final class Console extends Router
                 unset($commands['help']);
 
                 if ($commands === []) {
-                    $this->log('No hay comandos registrados.');
+                    $this->log('No registered commands.');
                     return 0;
                 }
 
@@ -92,7 +94,7 @@ final class Console extends Router
                 sort($names, SORT_STRING);
                 $width = max(array_map('strlen', $names));
 
-                $this->log('Comandos disponibles:'); $this->blank();
+                $this->log('Available commands:'); $this->blank();
 
                 foreach ($names as $name) {
 
@@ -102,7 +104,7 @@ final class Console extends Router
                     $this->log($description === '' ? $name : $name . str_repeat(' ', $padding) . $description);
                 }
 
-                $this->blank(); $this->log(sprintf("Usa '%s help <comando>' para más detalles.", $this->bin()));
+                $this->blank(); $this->log(sprintf("Use '%s help <command>' for more details.", $this->bin()));
 
                 return 0;
             }
@@ -112,30 +114,30 @@ final class Console extends Router
 
             if ($description === null) {
 
-                $this->error(sprintf("El comando '%s' no existe.", $command));
-                $this->log(sprintf("Usa '%s help' para ver la lista de comandos.", $this->bin()));
+                $this->error(sprintf("Command '%s' does not exist.", $command));
+                $this->log(sprintf("Use '%s help' to see the list of commands.", $this->bin()));
 
                 return 1;
             }
 
-            $this->log(sprintf('Comando: %s', $command));
+            $this->log(sprintf('Command: %s', $command));
 
             if ($description !== '') {
                 $this->blank();
-                $this->log('Descripción:');
+                $this->log('Description:');
                 $this->log('  ' . $description);
             }
 
             $this->blank();
-            $this->log('Uso:');
+            $this->log('Usage:');
             $this->log(sprintf('  %s %s', $this->bin(), $command));
 
             return 0;
 
-        })->describe('Muestra la ayuda de los comandos disponibles.');
+        })->describe('Shows help for available commands.');
     }
 
-    /** Registra un comando en la consola. */
+    /** Registers a command in the console. */
     public function command(string $name, callable $handler)
     {
         $command = $this->normalize($name);
@@ -150,25 +152,25 @@ final class Console extends Router
         return $this;
     }
 
-    /** Establece la descripción del comando activo. */
+    /** Sets the description of the active command. */
     public function describe(string $description)
     {
-        if ($this->active === null) throw new LogicException('No hay comando activo. Llama a command() antes de describe().');
+        if ($this->active === null) throw new LogicException('No active command. Call command() before describe().');
 
         $this->commands[$this->active]['description'] = trim($description);
 
         return $this;
     }
 
-    /** Devuelve la lista de comandos registrados. */
+    /** Returns the list of registered commands. */
     public function commands()
     {
         return $this->commands;
     }
 
     /**
-     * Detecta y ejecuta el comando correspondiente.
-     * 
+     * Detects and executes the corresponding command.
+     *
      * @param array<int, string> $arguments
      * @param resource|null $stdout
      * @param resource|null $stderr
@@ -217,94 +219,127 @@ final class Console extends Router
         return $code;
     }
 
-    /** Devuelve los argumentos del comando. */
+    /** Returns the command arguments. */
     public function arguments()
     {
         return $this->arguments;
     }
 
-    /** Devuelve el nombre del binario. */
+    /** Returns the binary name. */
     public function bin()
     {
         return $this->bin;
     }
 
-    /** Genera una línea en blanco. */
+    /** Generates a blank line. */
     public function blank(int $lines = 1)
     {
         if ($lines <= 0) return;
         for ($index = 0; $index < $lines; $index++) $this->log();
     }
 
-    /** Registra un mensaje en la salida estándar. */
+    /** Logs a message to standard output. */
     public function log(string $message = '')
     {
         $this->write($message);
     }
 
     /**
-     * Renderiza una tabla con columnas alineadas.
+     * Renders a formatted table with automatic column width calculation.
      *
-     * @param array<int|string, string> $columns Columnas como key => encabezado o lista de claves.
-     * @param array<int, array<string, mixed>> $rows Filas con valores indexados por las claves.
+     * Column alignment can be controlled by prefixing the header with:
+     * - `>Header` for right alignment
+     * - `<Header` for left alignment (default)
+     *
+     * Automatically strips ANSI codes when calculating widths.
+     *
+     * @param array<string, string> $columns Map of key => header (e.g., ['name' => 'Name', 'count' => '>Count'])
+     * @param array<int, array<string, mixed>> $rows Rows with values indexed by column keys
      */
     public function table(array $columns, array $rows): void
     {
         if ($rows === []) return;
 
-        if (array_is_list($columns)) {
-            $keys = $headers = array_map('strval', $columns);
-        } else {
-            $keys = array_map('strval', array_keys($columns));
-            $headers = array_map('strval', array_values($columns));
+        // Parse columns: ['key' => 'Header'] or ['key' => '<Header'] or ['key' => '>Header']
+        $keys = $headers = $aligns = [];
+        foreach ($columns as $key => $header) {
+            $keys[] = (string)$key;
+            $align = $header[0] ?? '';
+            $headers[] = match ($align) {
+                '<', '>' => substr($header, 1),
+                default => $header,
+            };
+            $aligns[] = match ($align) {
+                '>' => 'right',
+                default => 'left',
+            };
         }
 
-        $widths = array_map('strlen', $headers);
+        // Calculate column widths (strip ANSI codes for accurate width)
+        $stripAnsi = fn($s) => preg_replace('/\e\[[0-9;]*m/', '', $s);
+        $widths = array_map(fn($h) => strlen($stripAnsi($h)), $headers);
 
         foreach ($rows as $row) {
             foreach ($keys as $i => $key) {
-                $widths[$i] = max($widths[$i], strlen((string)($row[$key] ?? '-')));
+                $value = (string)($row[$key] ?? '-');
+                $widths[$i] = max($widths[$i], strlen($stripAnsi($value)));
             }
         }
 
-        $format = implode('  ', array_map(fn(int $width) => "%-{$width}s", $widths));
+        // Render table with bold headers
+        $renderRow = function($values) use ($widths, $aligns, $stripAnsi) {
+            $parts = [];
+            foreach ($values as $i => $value) {
+                $cleanLength = strlen($stripAnsi($value));
+                $padding = $widths[$i] - $cleanLength;
+                $parts[] = $aligns[$i] === 'right'
+                    ? str_repeat(' ', $padding) . $value
+                    : $value . str_repeat(' ', $padding);
+            }
+            return implode('  ', $parts);
+        };
 
-        $this->log(vsprintf($format, $headers));
-
+        $this->bold()->log($renderRow($headers));
         foreach ($rows as $row) {
-            $this->log(vsprintf($format, array_map(static fn(string $key) => (string)($row[$key] ?? '-'), $keys)));
+            $this->log($renderRow(array_map(fn($key) => (string)($row[$key] ?? '-'), $keys)));
         }
     }
 
-    /** Registra un mensaje de éxito. */
+    /** Logs a success message. */
     public function success(string $message)
     {
         $this->green()->log('[OK] ' . $message);
     }
 
-    /** Registra un mensaje informativo. */
+    /** Logs an informational message. */
     public function info(string $message)
     {
         $this->cyan()->log('[INFO] ' . $message);
     }
 
-    /** Registra un mensaje de advertencia. */
+    /** Logs a warning message. */
     public function warn(string $message)
     {
         $this->yellow()->write('[WARN] ' . $message, $this->stream('stderr'));
     }
 
-    /** Registra un mensaje de error. */
+    /** Logs an error message. */
     public function error(string $message)
     {
         $this->red()->write('[ERROR] ' . $message, $this->stream('stderr'));
     }
 
-    public function write(string $message, $stream = null)
+    public function write(string $message, $stream = null, bool $inPlace = false)
     {
         $stream = $this->validStream($stream) ?? $this->stream('stdout');
 
         if (!$stream) return;
+
+        if ($inPlace) {
+            fwrite($stream, "\r\033[2K" . $message);
+            fflush($stream);
+            return;
+        }
 
         if ($message === '') {
             fwrite($stream, PHP_EOL);
@@ -321,10 +356,31 @@ final class Console extends Router
         foreach ($lines as $line) fwrite($stream, $line . PHP_EOL);
     }
 
+    public function progress(int $current, int $total, string $label = '', array $breakdown = [])
+    {
+        if ($total === 0) return;
+
+        $percent = (int)(($current / $total) * 100);
+        $line = sprintf('%s %d/%d (%d%%)', $label, $current, $total, $percent);
+
+        if ($breakdown !== []) {
+            $parts = [];
+            foreach ($breakdown as $name => $counts) {
+                if (!is_array($counts) || count($counts) < 2) continue;
+                $parts[] = sprintf('%s: %d/%d', $name, $counts[0], $counts[1]);
+            }
+            if ($parts !== []) {
+                $line .= ' │ ' . implode(' │ ', array_slice($parts, 0, 4));
+            }
+        }
+
+        $this->write($line, null, true);
+    }
+
     public function __call(string $name, array $arguments)
     {
         if (!isset(self::STYLES[$name])) {
-            throw new BadMethodCallException(sprintf("El método '%s' no está definido.", $name));
+            throw new BadMethodCallException(sprintf("Method '%s' is not defined.", $name));
         }
 
         if ($arguments !== [] && is_string($arguments[0])) {
@@ -373,13 +429,13 @@ final class Console extends Router
             private function dispatch(string $method, array $arguments)
             {
                 if (!method_exists($this->console, $method)) {
-                    throw new BadMethodCallException(sprintf("Método '%s' no está disponible para estilos.", $method));
+                    throw new BadMethodCallException(sprintf("Method '%s' is not available for styling.", $method));
                 }
 
                 $message = $arguments[0] ?? null;
 
                 if (!is_string($message)) {
-                    throw new InvalidArgumentException(sprintf("Método '%s' requiere un mensaje.", $method));
+                    throw new InvalidArgumentException(sprintf("Method '%s' requires a message.", $method));
                 }
 
                 $reflection = new ReflectionMethod($this->console, $method);
@@ -469,8 +525,8 @@ final class Console extends Router
     {
         return function () {
 
-            $this->error($this->command === '' ? 'No se recibió ningún comando.' : sprintf("El comando '%s' no está definido.", $this->command));
-            $this->log(sprintf("Usa '%s help' para ver la lista de comandos.", $this->bin()));
+            $this->error($this->command === '' ? 'No command received.' : sprintf("Command '%s' is not defined.", $this->command));
+            $this->log(sprintf("Use '%s help' to see the list of commands.", $this->bin()));
 
             return 1;
         };

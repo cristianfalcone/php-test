@@ -39,21 +39,38 @@ final class Harness
     }
 }
 
-Test::suite('Console', function (Test $t) {
+Test::describe('Console', function () {
 
-    $t->beforeEach(function () {
+    Test::beforeEach(function () {
         Harness::reset();
     });
 
-    $t->test('command definitions include help', function () {
+    Test::it('should create instance without binding to facade', function () {
+        $previous = Console::instance();
+
+        try {
+            $cli = Console::create();
+
+            Test::assertInstanceOf(Root::class, $cli);
+            Test::assertNotSame($cli, Console::instance());
+
+            // To bind to facade, use swap
+            Console::swap($cli);
+            Test::assertSame($cli, Console::instance());
+        } finally {
+            Console::swap($previous);
+        }
+    });
+
+    Test::it('should include help in command definitions', function () {
         $cli = Console::create();
         $definitions = $cli->commands();
 
         Test::assertArrayHasKey('help', $definitions);
-        Test::assertSame('Muestra la ayuda de los comandos disponibles.', $definitions['help']['description']);
+        Test::assertSame('Shows help for available commands.', $definitions['help']['description']);
     });
 
-    $t->test('command registration stores description', function () {
+    Test::it('should store description on command registration', function () {
         $cli = Console::create();
 
         $cli->command('demo', fn() => 0)->describe('Demostracion');
@@ -63,7 +80,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('Demostracion', $definitions['demo']['description']);
     });
 
-    $t->test('dispatch runs command and returns exit code', function () {
+    Test::it('should run command and return exit code on dispatch', function () {
         $cli = Console::create();
         $executed = false;
 
@@ -81,7 +98,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('', $stderr);
     });
 
-    $t->test('middleware runs before command', function () {
+    Test::it('should run middleware before command', function () {
         $cli = Console::create();
         $events = [];
 
@@ -99,7 +116,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame(['mw', 'cmd'], $events);
     });
 
-    $t->test('prefixed middleware runs only for matching commands', function () {
+    Test::it('should run prefixed middleware only for matching commands', function () {
         $cli = Console::create();
         $events = [];
 
@@ -126,7 +143,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame(['status'], $events);
     });
 
-    $t->test('command receives arguments via static helper', function () {
+    Test::it('should receive arguments via static helper', function () {
         $cli = Console::create();
 
         $cli->command('demo', function () {
@@ -139,7 +156,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertStringContainsString('["foo","bar"]', $stdout);
     });
 
-    $t->test('help command lists registered commands', function () {
+    Test::it('should list registered commands in help', function () {
         $cli = Console::create();
         $cli->command('sample', fn() => 0)->describe('Sample command');
 
@@ -147,31 +164,31 @@ Test::suite('Console', function (Test $t) {
 
         Test::assertSame(0, $exitCode);
         Test::assertSame('', $stderr);
-        Test::assertStringContainsString('Comandos disponibles', $stdout);
+        Test::assertStringContainsString('Available commands', $stdout);
         Test::assertStringContainsString('sample', $stdout);
     });
 
-    $t->test('help for unknown command emits error', function () {
+    Test::it('should emit error for unknown command in help', function () {
         $cli = Console::create();
 
         [$exitCode, $stdout, $stderr] = dispatch($cli, 'help', ['missing']);
 
         Test::assertSame(1, $exitCode);
-        Test::assertStringContainsString("Usa 'console help' para ver la lista de comandos.", $stdout);
-        Test::assertStringContainsString('no existe', $stderr);
+        Test::assertStringContainsString("Use 'console help' to see the list of commands.", $stdout);
+        Test::assertStringContainsString('does not exist', $stderr);
     });
 
-    $t->test('dispatching unknown command emits not found message', function () {
+    Test::it('should emit not found message when dispatching unknown command', function () {
         $cli = Console::create();
 
         [$exitCode, $stdout, $stderr] = dispatch($cli, 'unknown');
 
         Test::assertSame(1, $exitCode);
-        Test::assertStringContainsString("Usa 'console help' para ver la lista de comandos.", $stdout);
-        Test::assertStringContainsString('no está definido', $stderr);
+        Test::assertStringContainsString("Use 'console help' to see the list of commands.", $stdout);
+        Test::assertStringContainsString('is not defined', $stderr);
     });
 
-    $t->test('success uses ansi colors when supported', function () {
+    Test::it('should use ansi colors when supported in success', function () {
         Harness::$isatty = true;
         $cli = Console::create();
 
@@ -188,7 +205,7 @@ Test::suite('Console', function (Test $t) {
         }
     });
 
-    $t->test('error writes to stderr with prefix', function () {
+    Test::it('should write to stderr with prefix on error', function () {
         $cli = Console::create();
 
         $cli->command('fail', function () {
@@ -201,7 +218,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertStringContainsString('[ERROR] fallo', $stderr);
     });
 
-    $t->test('command returning string is emitted', function () {
+    Test::it('should emit string when command returns string', function () {
         $cli = Console::create();
 
         $cli->command('echo', fn() => "hola mundo\n")->describe('Echo');
@@ -213,7 +230,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('', $stderr);
     });
 
-    $t->test('command returning false produces exit code one', function () {
+    Test::it('should produce exit code one when command returns false', function () {
         $cli = Console::create();
 
         $cli->command('fail', fn() => false)->describe('Fail');
@@ -223,7 +240,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame(1, $exitCode);
     });
 
-    $t->test('command returning null defaults to success', function () {
+    Test::it('should default to success when command returns null', function () {
         $cli = Console::create();
 
         $cli->command('null', fn() => null)->describe('Null');
@@ -235,13 +252,13 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('', $stderr);
     });
 
-    $t->test('facade does not expose private methods', function () {
+    Test::it('should not expose private methods in facade', function () {
         Test::expectException(\BadMethodCallException::class, function () {
             Console::detect(null);
         });
     });
 
-    $t->test('blank does not write when zero lines', function () {
+    Test::it('should not write when blank called with zero lines', function () {
         $cli = Console::create();
 
         $cli->command('blank', function () {
@@ -254,7 +271,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('', $stdout);
     });
 
-    $t->test('log handles empty message', function () {
+    Test::it('should handle empty message in log', function () {
         $cli = Console::create();
 
         $cli->command('empty-line', function () {
@@ -268,7 +285,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('', $stderr);
     });
 
-    $t->test('style builder applies styles before logging', function () {
+    Test::it('should apply styles before logging', function () {
         $cli = Console::create();
 
         $cli->command('styled', function () {
@@ -282,7 +299,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('', $stderr);
     });
 
-    $t->test('style builder delegates to helper', function () {
+    Test::it('should delegate to helper in style builder', function () {
         $cli = Console::create();
 
         $cli->command('styled-info', function () {
@@ -296,7 +313,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('', $stderr);
     });
 
-    $t->test('style helpers return styled strings', function () {
+    Test::it('should return styled strings from style helpers', function () {
         $cli = Console::create();
 
         $cli->command('styled-inline', function () {
@@ -312,23 +329,23 @@ Test::suite('Console', function (Test $t) {
         Test::assertStringContainsString('alerta', $stdout);
     });
 
-    $t->test('style builder requires message', function () {
+    Test::it('should require message in style builder', function () {
         Test::expectException(\InvalidArgumentException::class, function () {
             Console::bold()->log();
         });
     });
 
-    $t->test('help shows fallback when no commands registered', function () {
+    Test::it('should show fallback when no commands registered in help', function () {
         $cli = Console::create();
 
         [$exitCode, $stdout, $stderr] = dispatch($cli, 'help');
 
         Test::assertSame(0, $exitCode);
         Test::assertSame('', $stderr);
-        Test::assertStringContainsString('No hay comandos registrados.', $stdout);
+        Test::assertStringContainsString('No registered commands.', $stdout);
     });
 
-    $t->test('help for known command displays details', function () {
+    Test::it('should display details for known command in help', function () {
         $cli = Console::create();
         $cli->command('info', fn() => 0)->describe('Detalle completo');
 
@@ -336,13 +353,13 @@ Test::suite('Console', function (Test $t) {
 
         Test::assertSame(0, $exitCode);
         Test::assertSame('', $stderr);
-        Test::assertStringContainsString('Comando: info', $stdout);
-        Test::assertStringContainsString('Descripción:', $stdout);
+        Test::assertStringContainsString('Command: info', $stdout);
+        Test::assertStringContainsString('Description:', $stdout);
         Test::assertStringContainsString('Detalle completo', $stdout);
-        Test::assertStringContainsString('Uso:', $stdout);
+        Test::assertStringContainsString('Usage:', $stdout);
     });
 
-    $t->test('dispatch handles exception with default handler', function () {
+    Test::it('should handle exception with default handler on dispatch', function () {
         $cli = Console::create();
         $cli->command('boom', function () {
             throw new RuntimeException('fallo');
@@ -355,7 +372,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertStringContainsString('fallo', $stderr);
     });
 
-    $t->test('dispatch without custom streams uses standard output', function () {
+    Test::it('should use standard output when dispatching without custom streams', function () {
         $cli = Console::create();
         $cli->command('ping', fn() => 'pong')->describe('Ping');
 
@@ -365,17 +382,17 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame('console', Console::bin());
     });
 
-    $t->test('dispatching empty command emits error', function () {
+    Test::it('should emit error when dispatching empty command', function () {
         $cli = Console::create();
 
         [$exitCode, $stdout, $stderr] = dispatch($cli, '', []);
 
         Test::assertSame(1, $exitCode);
-        Test::assertStringContainsString('No se recibió ningún comando.', $stderr);
-        Test::assertStringContainsString("Usa 'console help'", $stdout);
+        Test::assertStringContainsString('No command received.', $stderr);
+        Test::assertStringContainsString("Use 'console help'", $stdout);
     });
 
-    $t->test('log without initialization writes to stdout', function () {
+    Test::it('should write to stdout when logging without initialization', function () {
         [$out] = silence(function () {
             Console::log('pre-init');
         });
@@ -389,7 +406,7 @@ Test::suite('Console', function (Test $t) {
         Test::assertSame("pre-init\n", $out);
     });
 
-    $t->test('cleanup closes owned streams', function () {
+    Test::it('should close owned streams on cleanup', function () {
         $cli = Console::create();
         $cli->command('noop', fn() => 0)->describe('Noop');
 

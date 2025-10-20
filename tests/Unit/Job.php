@@ -9,7 +9,6 @@ use Ajo\Container;
 use Ajo\Core\Job as CoreJob;
 use Ajo\Job;
 use Ajo\Test;
-use ArrayObject;
 use DateTimeImmutable;
 use PDO;
 use PDOStatement;
@@ -18,9 +17,9 @@ use RuntimeException;
 use function Ajo\Tests\Support\Console\dispatch;
 use function Ajo\Tests\Support\Console\silence;
 
-Test::suite('Jobs', function (Test $t) {
+Test::suite('Job', function () {
 
-    $t->beforeEach(function (ArrayObject $state): void {
+    Test::beforeEach(function ($state): void {
         Container::clear();
 
         $pdo = new MysqlForSqlitePDO();
@@ -31,13 +30,13 @@ Test::suite('Jobs', function (Test $t) {
         resetSingleton();
     });
 
-    $t->afterEach(function (ArrayObject $state): void {
+    Test::afterEach(function ($state): void {
         Container::clear();
         resetSingleton();
         unset($state['pdo']);
     });
 
-    $t->test('register adds job commands', function () {
+    Test::it('should add job commands on register', function () {
         $cli = Console::create();
         $jobs = Job::register($cli);
 
@@ -50,7 +49,7 @@ Test::suite('Jobs', function (Test $t) {
         }
     });
 
-    $t->test('schedule adds job with defaults', function () {
+    Test::it('should add job with defaults on schedule', function () {
         $handler = fn() => null;
 
         Job::schedule('*/5 * * * *', $handler);
@@ -68,9 +67,31 @@ Test::suite('Jobs', function (Test $t) {
         Test::assertSame(3600, $job['lease']);
         Test::assertSame($handler, $job['handler']);
         Test::assertNotSame('', $job['name']);
+        Test::assertFalse($job['parsed']['hasSeconds']);
     });
 
-    $t->test('fluent modifiers override defaults', function () {
+    Test::it('should incorporate key without overriding explicit name', function () {
+        Job::schedule('* * * * *', fn() => null)
+            ->key('alpha');
+
+        $job = jobs()[0];
+
+        Test::assertSame(substr(sha1('* * * * *|alpha'), 0, 12), $job['name']);
+        Test::assertSame('alpha', $job['hash']);
+        Test::assertFalse($job['custom']);
+
+        Job::schedule('* * * * *', fn() => null)
+            ->name('explicit')
+            ->key('beta');
+
+        $second = jobs()[1];
+
+        Test::assertSame('explicit', $second['name']);
+        Test::assertSame('beta', $second['hash']);
+        Test::assertTrue($second['custom']);
+    });
+
+    Test::it('should fluent modifiers override defaults', function () {
         $handler = fn() => null;
 
         Job::schedule('0 * * * *', $handler)
@@ -89,7 +110,7 @@ Test::suite('Jobs', function (Test $t) {
         Test::assertSame(180, $job['lease']);
     });
 
-    $t->test('run executes due jobs and updates state', function (ArrayObject $state) {
+    Test::it('should execute due jobs and update state on run', function ($state) {
         $cli = Console::create();
         Job::register($cli);
 
@@ -102,21 +123,20 @@ Test::suite('Jobs', function (Test $t) {
         [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:collect');
 
         Test::assertSame(0, $exitCode);
-        Test::assertStringContainsString('Ejecutados 1 job(s).', $stdout);
+        Test::assertStringContainsString('Executed 1 job(s).', $stdout);
         Test::assertSame('', $stderr);
         Test::assertSame(1, $executed);
 
         $row = row($state, 'alpha');
 
         Test::assertNotNull($row['last_run']);
-        Test::assertSame($row['last_run'], $row['last_tick']);
-        Test::assertSame('00', (new DateTimeImmutable($row['last_run']))->format('s'));
         Test::assertSame(0, (int)$row['fail_count']);
         Test::assertNull($row['last_error']);
         Test::assertNull($row['lease_until']);
+        Test::assertNotNull($row['seen_at']);
     });
 
-    $t->test('run skips jobs when concurrency limit reached', function (ArrayObject $state) {
+    Test::it('should skip jobs when concurrency limit reached on run', function ($state) {
         $cli = Console::create();
         Job::register($cli);
 
@@ -130,7 +150,7 @@ Test::suite('Jobs', function (Test $t) {
             ->concurrency(1);
 
         Job::schedule('* * * * *', function (): void {
-            Test::fail('La cola ya alcanzó el límite de concurrencia.');
+            Test::fail('The queue already reached the concurrency limit.');
         })
             ->name('beta')
             ->queue('emails')
@@ -149,17 +169,16 @@ Test::suite('Jobs', function (Test $t) {
         [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:collect');
 
         Test::assertSame(0, $exitCode);
-        Test::assertSame('', $stdout);
+        Test::assertStringContainsString('No due jobs.', $stdout);
         Test::assertSame('', $stderr);
         Test::assertFalse($alphaExecuted);
 
         $betaRow = row($state, 'beta');
         Test::assertNull($betaRow['last_run']);
-        Test::assertNull($betaRow['last_tick']);
         Test::assertSame(0, (int)$betaRow['fail_count']);
     });
 
-    $t->test('run records failures and leaves trace', function (ArrayObject $state) {
+    Test::it('should record failures and leave trace on run', function ($state) {
         $cli = Console::create();
         Job::register($cli);
 
@@ -170,34 +189,82 @@ Test::suite('Jobs', function (Test $t) {
         [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:collect');
 
         Test::assertSame(0, $exitCode);
-        Test::assertStringContainsString('Ejecutados 1 job(s).', $stdout);
+        Test::assertStringContainsString('Executed 1 job(s).', $stdout);
         Test::assertStringContainsString('boom failure message', $stderr);
 
         $row = row($state, 'failing');
 
-        Test::assertNull($row['last_run']);
-        Test::assertNotNull($row['last_tick']);
-        Test::assertSame('00', (new DateTimeImmutable($row['last_tick']))->format('s'));
+        Test::assertNotNull($row['last_run']);
         Test::assertSame('boom failure message', $row['last_error']);
         Test::assertSame(1, (int)$row['fail_count']);
         Test::assertNull($row['lease_until']);
     });
 
-    $t->test('due combines day of month and week correctly', function () {
+    Test::it('should match cron day combinations correctly', function () {
         $cli = Console::create();
         $jobs = Job::register($cli);
 
-        $check = fn(string $expr, string $date) => callPrivate($jobs, 'due', $expr, new DateTimeImmutable($date));
+        $match = function (string $expr, string $date) use ($jobs): bool {
+            $parsed = callPrivate($jobs, 'parse', $expr);
 
-        Test::assertTrue($check('0 0 1 * 0', '2024-12-01 00:00:00')); // domingo y día 1
-        Test::assertFalse($check('0 0 1 * 0', '2024-12-02 00:00:00')); // lunes 2
+            return callPrivate(
+                $jobs,
+                'matches',
+                $parsed,
+                new DateTimeImmutable($date),
+            );
+        };
 
-        Test::assertTrue($check('15 10 * * 3', '2024-05-08 10:15:00')); // miércoles
-        Test::assertTrue($check('15 10 10 * 3', '2024-05-10 10:15:00')); // día del mes
-        Test::assertFalse($check('15 10 10 * 3', '2024-05-09 10:15:00')); // ni día ni dow
+        Test::assertTrue($match('0 0 1 * 0', '2024-12-01 00:00:00')); // domingo y día 1
+        Test::assertFalse($match('0 0 1 * 0', '2024-12-02 00:00:00')); // lunes 2
+        Test::assertTrue($match('15 10 * * 3', '2024-05-08 10:15:00'));
+        Test::assertTrue($match('15 10 10 * 3', '2024-05-10 10:15:00'));
+        Test::assertFalse($match('15 10 10 * 3', '2024-05-09 10:15:00'));
     });
 
-    $t->test('forever stops when stop called', function () {
+    Test::it('should evaluate five-field cron once per minute', function () {
+        $jobs = jobsInstance();
+
+        $parsed = callPrivate($jobs, 'parse', '* * * * *');
+        $moment = new DateTimeImmutable('2024-01-01 12:07:25');
+
+        $first = callPrivate($jobs, 'evaluate', $parsed, $moment, null);
+        Test::assertTrue($first['due']);
+        Test::assertSame('2024-01-01 12:08:00', $first['next']->format('Y-m-d H:i:s'));
+
+        $sameMinute = callPrivate(
+            $jobs,
+            'evaluate',
+            $parsed,
+            $moment,
+            new DateTimeImmutable('2024-01-01 12:07:01'),
+        );
+
+        Test::assertFalse($sameMinute['due']);
+    });
+
+    Test::it('should evaluate six-field cron once per second', function () {
+        $jobs = jobsInstance();
+
+        $parsed = callPrivate($jobs, 'parse', '*/5 * * * * *');
+        $moment = new DateTimeImmutable('2024-01-01 00:00:10');
+
+        $first = callPrivate($jobs, 'evaluate', $parsed, $moment, null);
+        Test::assertTrue($first['due']);
+        Test::assertSame('2024-01-01 00:00:15', $first['next']->format('Y-m-d H:i:s'));
+
+        $sameSecond = callPrivate(
+            $jobs,
+            'evaluate',
+            $parsed,
+            $moment,
+            new DateTimeImmutable('2024-01-01 00:00:10'),
+        );
+
+        Test::assertFalse($sameSecond['due']);
+    });
+
+    Test::it('should stop when stop called in forever', function () {
         $cli = Console::create();
         /** @var CoreJob $jobs */
         $jobs = Job::register($cli);
@@ -209,14 +276,93 @@ Test::suite('Jobs', function (Test $t) {
             $jobs->stop();
         })->name('self.stop');
 
-        silence(fn() => $jobs->forever(0));
+        silence(fn() => $jobs->forever());
 
         Test::assertSame(1, $executed);
+    });
+
+    Test::it('should reset queue to default when null provided', function () {
+        Job::schedule('* * * * *', fn() => null)
+            ->queue(null);
+
+        $job = jobs()[0];
+        Test::assertSame('default', $job['queue']);
+    });
+
+    Test::it('should enforce minimum duration in lease', function () {
+        Job::schedule('* * * * *', fn() => null)
+            ->lease(10);
+
+        $job = jobs()[0];
+        Test::assertSame(60, $job['lease']);
+    });
+
+    Test::it('should render registered jobs in status command', function ($state) {
+        $cli = Console::create();
+        Job::register($cli);
+
+        Job::schedule('* * * * *', fn() => null)->name('status.job');
+
+        dispatch($cli, 'jobs:install');
+        [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:status');
+
+        Test::assertSame(0, $exitCode);
+        Test::assertSame('', $stderr);
+        Test::assertStringContainsString('Defined: 1 | Running: 0 | Idle: 1', $stdout);
+        Test::assertStringContainsString('status.job', $stdout);
+    });
+
+    Test::it('should prune unseen jobs', function ($state) {
+        $cli = Console::create();
+        Job::register($cli);
+
+        Job::schedule('* * * * *', fn() => null)->name('stale.job');
+
+        dispatch($cli, 'jobs:install');
+        dispatch($cli, 'jobs:collect');
+
+        $pdo = pdo($state);
+        $old = '2000-01-01 00:00:00';
+
+        $update = $pdo->prepare('UPDATE jobs SET seen_at = :old WHERE name = :name');
+        $update->execute([':old' => $old, ':name' => 'stale.job']);
+
+        $pdo->exec("
+            INSERT INTO jobs (name, last_run, lease_until, last_error, fail_count, seen_at, created_at, updated_at)
+            VALUES ('legacy.job', NULL, NULL, NULL, 0, '1990-01-01 00:00:00', '1990-01-01 00:00:00', '1990-01-01 00:00:00')
+        ");
+
+        [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:prune');
+
+        Test::assertSame(0, $exitCode);
+        Test::assertSame('', $stderr);
+        Test::assertStringContainsString('Pruned', $stdout);
+
+        $staleCount = $pdo->query("SELECT COUNT(*) FROM jobs WHERE name = 'stale.job'");
+        Test::assertNotFalse($staleCount);
+        Test::assertSame(0, (int)$staleCount->fetchColumn());
+        $staleCount->closeCursor();
+
+        $legacyCount = $pdo->query("SELECT COUNT(*) FROM jobs WHERE name = 'legacy.job'");
+        Test::assertNotFalse($legacyCount);
+        Test::assertSame(0, (int)$legacyCount->fetchColumn());
+        $legacyCount->closeCursor();
     });
 });
 
 /**
- * @return array<int, array{name:string,cron:string,queue:string,concurrency:int,priority:int,lease:int,handler:callable}>
+ * @return array<int, array{
+ *     name: string,
+ *     cron: string,
+ *     queue: string,
+ *     concurrency: int,
+ *     priority: int,
+ *     lease: int,
+ *     handler: callable,
+ *     parsed: array,
+ *     hash: ?string,
+ *     custom: bool
+ * }>
  */
 function jobs(): array
 {
@@ -226,7 +372,7 @@ function jobs(): array
     $property = $reflection->getProperty('jobs');
     $property->setAccessible(true);
 
-    /** @var array<int, array{name:string,cron:string,queue:string,concurrency:int,priority:int,lease:int,handler:callable}> $jobs */
+    /** @var array<int, array{name:string,cron:string,queue:string,concurrency:int,priority:int,lease:int,handler:callable,parsed:array,hash:?string,custom:bool}> $jobs */
     $jobs = $property->getValue($instance);
 
     return $jobs;
@@ -237,7 +383,7 @@ function jobsInstance(): CoreJob
     $instance = Job::instance();
 
     if (!$instance instanceof CoreJob) {
-        Test::fail('La instancia de Jobs no está disponible.');
+        Test::fail('Jobs instance is not available.');
     }
 
     return $instance;
@@ -256,16 +402,16 @@ function callPrivate(object $instance, string $method, mixed ...$args): mixed
     }, $instance, $instance);
 
     if (!$closure instanceof \Closure) {
-        Test::fail('No se pudo invocar el método privado.');
+        Test::fail('Could not invoke private method.');
     }
 
     return $closure();
 }
 
 /**
- * @return array{name:?string,last_tick:?string,lease_until:?string,last_run:?string,last_error:?string,fail_count:int,seen_at:?string}
+ * @return array{name:?string,lease_until:?string,last_run:?string,last_error:?string,fail_count:int,seen_at:?string,created_at:?string,updated_at:?string}
  */
-function row(ArrayObject $state, string $name): array
+function row($state, string $name): array
 {
     $statement = pdo($state)->prepare('SELECT * FROM jobs WHERE name = :n');
     $statement->execute([':n' => $name]);
@@ -276,31 +422,32 @@ function row(ArrayObject $state, string $name): array
     if ($row === false) {
         return [
             'name' => $name,
-            'last_tick' => null,
             'lease_until' => null,
             'last_run' => null,
             'last_error' => null,
             'fail_count' => 0,
             'seen_at' => null,
+            'created_at' => null,
+            'updated_at' => null,
         ];
     }
 
     return $row;
 }
 
-function pdo(ArrayObject $state): PDO
+function pdo($state): PDO
 {
     $pdo = $state['pdo'] ?? null;
 
     if (!$pdo instanceof PDO) {
-        Test::fail('La conexión PDO no está disponible.');
+        Test::fail('PDO connection is not available.');
     }
 
     return $pdo;
 }
 
 /**
- * Permite ejecutar SQL pensado para MySQL sobre SQLite durante los tests.
+ * Allows executing MySQL-intended SQL over SQLite during tests.
  */
 final class MysqlForSqlitePDO extends PDO
 {
@@ -339,21 +486,21 @@ final class MysqlForSqlitePDO extends PDO
             return <<<SQL
 CREATE TABLE IF NOT EXISTS jobs (
     name TEXT PRIMARY KEY,
-    last_tick TEXT NULL,
-    lease_until TEXT NULL,
     last_run TEXT NULL,
+    lease_until TEXT NULL,
     last_error TEXT NULL,
     fail_count INTEGER NOT NULL DEFAULT 0,
     seen_at TEXT NULL,
-    retired_at TEXT NULL
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 SQL;
         }
 
         if (str_contains($upper, 'ON DUPLICATE KEY UPDATE')) {
             return <<<SQL
-INSERT INTO jobs (name, seen_at) VALUES (:n, :s)
-ON CONFLICT(name) DO UPDATE SET seen_at = excluded.seen_at, retired_at = NULL;
+INSERT INTO jobs (name, seen_at) VALUES (:name, :seen)
+ON CONFLICT(name) DO UPDATE SET seen_at = excluded.seen_at;
 SQL;
         }
 
@@ -372,3 +519,4 @@ SQL;
         return $sql;
     }
 }
+

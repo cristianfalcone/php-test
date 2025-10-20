@@ -4,12 +4,13 @@ declare(strict_types=1);
 
 namespace Ajo;
 
+use Ajo\Core\Console as CoreConsole;
 use PDO;
 use RuntimeException;
 use Throwable;
 
 /**
- * Manejo de migraciones de base de datos.
+ * Database migration management.
  */
 final class Migrations
 {
@@ -25,20 +26,20 @@ final class Migrations
     }
 
     /**
-     * Registra los comandos de migración en la consola.
+     * Registers migration commands in the console.
      */
-    public static function register(Console $cli, string $path)
+    public static function register(CoreConsole $cli, string $path)
     {
         $self = new self($path);
 
-        $cli->command('migrate', fn() => $self->migrate())->describe('Ejecuta todas las migraciones pendientes.');
-        $cli->command('migrate:status', fn() => $self->status())->describe('Muestra el estado actual de las migraciones.');
-        $cli->command('migrate:rollback', fn() => $self->rollback())->describe('Revierte la última tanda de migraciones aplicada.');
-        $cli->command('migrate:reset', fn() => $self->reset())->describe('Revierte todas las migraciones aplicadas.');
-        $cli->command('migrate:fresh', fn() => $self->fresh())->describe('Resetea y vuelve a ejecutar todas las migraciones.');
-        $cli->command('migrate:refresh', fn() => $self->refresh())->describe('Revierte la última tanda y la vuelve a aplicar.');
-        $cli->command('migrate:install', fn() => $self->install())->describe('Crea la tabla de seguimiento de migraciones.');
-        $cli->command('migrate:make', fn() => $self->make())->describe('Genera un archivo de migración.');
+        $cli->command('migrate',          fn() => $self->migrate())->describe('Runs all pending migrations.');
+        $cli->command('migrate:status',   fn() => $self->status())->describe('Shows the current status of migrations.');
+        $cli->command('migrate:rollback', fn() => $self->rollback())->describe('Reverts the last applied batch of migrations.');
+        $cli->command('migrate:reset',    fn() => $self->reset())->describe('Reverts all applied migrations.');
+        $cli->command('migrate:fresh',    fn() => $self->fresh())->describe('Resets and re-runs all migrations.');
+        $cli->command('migrate:refresh',  fn() => $self->refresh())->describe('Reverts the last batch and re-applies it.');
+        $cli->command('migrate:install',  fn() => $self->install())->describe('Creates the migration tracking table.');
+        $cli->command('migrate:make',     fn() => $self->make())->describe('Generates a migration file.');
 
         return $self;
     }
@@ -50,7 +51,7 @@ final class Migrations
         $pending = $this->pending();
 
         if ($pending === []) {
-            Console::log('No hay migraciones pendientes.');
+            Console::log('No pending migrations.');
             return 0;
         }
 
@@ -82,16 +83,16 @@ final class Migrations
 
                 $message = $exception->getMessage() !== ''
                     ? $exception->getMessage()
-                    : 'No se pudieron ejecutar las migraciones.';
+                    : 'Could not execute migrations.';
 
                 Console::error($message);
-                Console::log('Fallo en: ' . $migration);
+                Console::log('Failed on: ' . $migration);
 
                 return 1;
             }
         }
 
-        Console::success(sprintf('Migraciones aplicadas. Batch %d, %d entradas procesadas.', $batch, count($migrated)));
+        Console::success(sprintf('Migrations applied. Batch %d, %d entries processed.', $batch, count($migrated)));
 
         foreach ($migrated as $migration) {
             Console::log('  - ' . $migration);
@@ -124,7 +125,7 @@ final class Migrations
         }
 
         Console::log(sprintf(
-            'Total: %d | Aplicadas: %d | Pendientes: %d',
+            'Total: %d | Applied: %d | Pending: %d',
             count($rows),
             count($applied),
             max(0, count($rows) - count($applied)),
@@ -144,7 +145,7 @@ final class Migrations
         $latest = $this->last();
 
         if ($latest === []) {
-            Console::log('No hay migraciones para revertir.');
+            Console::log('No migrations to revert.');
             return 0;
         }
 
@@ -155,14 +156,14 @@ final class Migrations
             $name = (string)$row['migration'];
             $file = $available[$name] ?? null;
 
-            if (!$this->revert($name, $file, 'No se pudieron revertir las migraciones.')) {
+            if (!$this->revert($name, $file, 'Could not revert migrations.')) {
                 return 1;
             }
 
             $rolled[] = $name;
         }
 
-        Console::success(sprintf('Migraciones revertidas. Procesadas: %d.', count($rolled)));
+        Console::success(sprintf('Migrations reverted. Processed: %d.', count($rolled)));
 
         foreach ($rolled as $name) {
             Console::log('  - ' . $name);
@@ -190,7 +191,7 @@ final class Migrations
 
             $file = $available[$name] ?? null;
 
-            if (!$this->revert($name, $file, 'No se pudieron resetear las migraciones.')) {
+            if (!$this->revert($name, $file, 'Could not reset migrations.')) {
                 return 1;
             }
 
@@ -198,11 +199,11 @@ final class Migrations
         }
 
         if ($rolled === []) {
-            Console::log('No hay migraciones para resetear.');
+            Console::log('No migrations to reset.');
             return 0;
         }
 
-        Console::success(sprintf('Migraciones reseteadas. Procesadas: %d.', count($rolled)));
+        Console::success(sprintf('Migrations reset. Processed: %d.', count($rolled)));
 
         foreach ($rolled as $name) {
             Console::log('  - ' . $name);
@@ -231,19 +232,19 @@ final class Migrations
         $statement = $this->pdo()->prepare($sql);
 
         if ($statement === false) {
-            throw new RuntimeException('No se pudo preparar la consulta de conteo.');
+            throw new RuntimeException('Could not prepare count query.');
         }
 
         $statement->execute();
         $count = (int)$statement->fetchColumn();
 
         if ($count > 0) {
-            Console::log('La tabla de migraciones ya está inicializada.');
+            Console::log('Migration table is already initialized.');
             return 0;
         }
 
         $this->record('bootstrap', 0);
-        Console::success('Registro de migraciones inicializado.');
+        Console::success('Migration registry initialized.');
 
         return 0;
     }
@@ -251,7 +252,7 @@ final class Migrations
     private function make()
     {
         if (!is_writable($this->path)) {
-            Console::error('No se puede escribir en el directorio de migraciones.');
+            Console::error('Cannot write to migrations directory.');
             return 1;
         }
 
@@ -259,11 +260,11 @@ final class Migrations
         $suffix = '';
 
         if ($raw !== null && ($raw = trim($raw)) !== '') {
-            // Añadir espacio entre palabras
+            // Add space between words
             $raw = preg_replace('/([a-z\d])([A-Z])/', '$1 $2', $raw) ?? $raw;
-            // Reemplazar caracteres no alfanuméricos por espacios
+            // Replace non-alphanumeric characters with spaces
             $raw = preg_replace('/[^a-zA-Z0-9]+/', ' ', $raw) ?? $raw;
-            // Dividir en partes
+            // Split into parts
             $parts = preg_split('/\s+/', strtolower($raw), -1, PREG_SPLIT_NO_EMPTY);
             if (is_array($parts) && $parts !== []) {
                 $suffix = implode('_', $parts);
@@ -285,22 +286,22 @@ final class Migrations
 
 return [
     'up' => function (PDO $pdo) {
-        // TODO: Implementar la migración.
+        // TODO: Implement the migration.
     },
     'down' => function (PDO $pdo) {
-        // TODO: Revertir la migración.
+        // TODO: Revert the migration.
     },
 ];
 
 PHP;
 
         if (file_put_contents($file, $template) === false) {
-            Console::error('No se pudo crear el archivo de migración.');
+            Console::error('Could not create migration file.');
             return 1;
         }
 
-        Console::success(sprintf('Migración creada: %s', $name));
-        Console::log('Edita el archivo para definir los cambios de esquema.');
+        Console::success(sprintf('Migration created: %s', $name));
+        Console::log('Edit the file to define schema changes.');
 
         return 0;
     }
@@ -311,21 +312,21 @@ PHP;
     private function render(array $rows)
     {
         if ($rows === []) {
-            Console::log('No hay migraciones definidas.');
+            Console::log('No defined migrations.');
             return;
         }
 
         $columns = [
-            'migration' => 'Migracion',
-            'ran'       => 'Aplicada',
+            'migration' => 'Migration',
+            'ran'       => 'Applied',
             'batch'     => 'Batch',
-            'ran_at'    => 'Ejecutada',
+            'ran_at'    => 'Ran At',
         ];
 
         $lines = array_map(static function (array $row): array {
             return [
                 'migration' => $row['migration'],
-                'ran'       => $row['ran'] ? 'si' : 'no',
+                'ran'       => $row['ran'] ? 'yes' : 'no',
                 'batch'     => $row['batch'] !== null ? (string)$row['batch'] : '-',
                 'ran_at'    => $row['ran_at'] ?? '-',
             ];
@@ -352,7 +353,7 @@ PHP;
     {
         if ($file === null) {
             Console::error($failure);
-            Console::log('Fallo en: ' . $name);
+            Console::log('Failed on: ' . $name);
             return false;
         }
 
@@ -380,7 +381,7 @@ PHP;
             }
 
             Console::error($message);
-            Console::log('Fallo en: ' . $name);
+            Console::log('Failed on: ' . $name);
 
             return false;
         }
@@ -388,8 +389,8 @@ PHP;
 
     private function pdo()
     {
-        $pdo = Container::get('db');
-        if (!$pdo instanceof PDO) throw new RuntimeException('No hay conexión a la base de datos.');
+        $pdo = Container::get('db', null);
+        if (!$pdo instanceof PDO) throw new RuntimeException('No database connection available.');
         return $pdo;
     }
 
@@ -463,7 +464,7 @@ PHP;
         $statement = $this->pdo()->prepare($sql);
 
         if ($statement === false) {
-            throw new RuntimeException('No se pudo preparar la inserción de migraciones.');
+            throw new RuntimeException('Could not prepare migration insertion.');
         }
 
         $statement->execute([
@@ -508,7 +509,7 @@ PHP;
         $statement = $this->pdo()->prepare($sql);
 
         if ($statement === false) {
-            throw new RuntimeException('No se pudo preparar la eliminación de migraciones.');
+            throw new RuntimeException('Could not prepare migration deletion.');
         }
 
         $statement->execute([':migration' => $name]);

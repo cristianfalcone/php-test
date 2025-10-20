@@ -9,7 +9,7 @@ services:
         APP_ENV: ${APP_ENV:-production}
     env_file: [ .env ]
     environment:
-      TZ: ${TZ:-America/Argentina/Buenos_Aires}
+      TZ: ${TZ:-UTC}
       UID: ${UID:-1000}
       GID: ${GID:-1000}
     volumes:
@@ -28,7 +28,7 @@ services:
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     networks: [ web ]
     environment:
-      TZ: ${TZ:-America/Argentina/Buenos_Aires}
+      TZ: ${TZ:-UTC}
 
   db:
     image: mysql:8.0
@@ -38,7 +38,7 @@ services:
       MYSQL_DATABASE: ${DB_DATABASE:-app}
       MYSQL_USER: ${DB_USER:-appuser}
       MYSQL_PASSWORD: ${DB_PASSWORD:-apppass}
-      TZ: ${TZ:-America/Argentina/Buenos_Aires}
+      TZ: ${TZ:-UTC}
     volumes:
       - data:/var/lib/mysql
     networks: [ db ]
@@ -51,7 +51,7 @@ services:
     networks: [ db ]
     environment:
       ADMINER_DEFAULT_SERVER: db
-      TZ: ${TZ:-America/Argentina/Buenos_Aires}
+      TZ: ${TZ:-UTC}
 
 networks:
   web: {}

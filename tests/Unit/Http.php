@@ -6,7 +6,7 @@ namespace Ajo\Core;
 
 use Ajo\Tests\Unit\Http\TestHarness;
 
-function http_response_code(?int $code = null): int
+function http_response_code(?int $code = null)
 {
     if ($code !== null) {
         TestHarness::$status = $code;
@@ -15,7 +15,7 @@ function http_response_code(?int $code = null): int
     return TestHarness::$status ?? 200;
 }
 
-function header(string $header, bool $replace = true, ?int $response_code = null): void
+function header(string $header, bool $replace = true, ?int $response_code = null)
 {
     TestHarness::$headers[] = [$header, $replace, $response_code];
 
@@ -41,24 +41,24 @@ final class TestHarness
     public static array $headers = [];
     public static ?int $status = null;
 
-    public static function reset(): void
+    public static function reset()
     {
         self::$headers = [];
         self::$status = null;
     }
 }
 
-Test::suite('Http', function (Test $t) {
+Test::suite('Http', function () {
 
-    $t->beforeEach(function () {
+    Test::beforeEach(function () {
         TestHarness::reset();
     });
 
-    $t->test('create returns http instance', function () {
+    Test::it('should return http instance on create', function () {
         Test::assertInstanceOf(Root::class, Http::create());
     });
 
-    $t->test('global middleware runs before route handler', function () {
+    Test::it('should run global middleware before route handler', function () {
 
         $http = Http::create();
         $events = [];
@@ -82,7 +82,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertSame(['ok' => true], $payload);
     });
 
-    $t->test('path specific middleware runs only when prefix matches', function () {
+    Test::it('should run path specific middleware only when prefix matches', function () {
 
         $http = Http::create();
         $events = [];
@@ -105,7 +105,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertSame(['ok' => true], decode($secondOutput));
     });
 
-    $t->test('map registers handlers for multiple methods', function () {
+    Test::it('should register handlers for multiple methods', function () {
 
         $http = Http::create();
 
@@ -119,7 +119,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertSame(decode($getOutput), decode($postOutput));
     });
 
-    $t->test('map without handlers fails', function () {
+    Test::it('should fail when map called without handlers', function () {
 
         $http = Http::create();
 
@@ -128,7 +128,7 @@ Test::suite('Http', function (Test $t) {
         });
     });
 
-    $t->test('dynamic method registers route', function () {
+    Test::it('should register route via dynamic method', function () {
 
         $http = Http::create();
 
@@ -140,7 +140,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertSame(['posted' => true], decode($output));
     });
 
-    $t->test('dynamic method throws for unsupported verb', function () {
+    Test::it('should throw when dynamic method uses unsupported verb', function () {
 
         $http = Http::create();
 
@@ -149,7 +149,7 @@ Test::suite('Http', function (Test $t) {
         });
     });
 
-    $t->test('dispatch uses default not found handler', function () {
+    Test::it('should use default not found handler', function () {
 
         $http = Http::create();
 
@@ -158,10 +158,10 @@ Test::suite('Http', function (Test $t) {
 
         Test::assertSame(404, $status);
         Test::assertFalse($payload['ok']);
-        Test::assertSame('no_encontrado', $payload['error']);
+        Test::assertSame('not_found', $payload['error']);
     });
 
-    $t->test('dispatch returns 204 when handler yields null', function () {
+    Test::it('should return 204 when handler yields null', function () {
 
         $http = Http::create();
 
@@ -173,7 +173,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertSame(204, $status);
     });
 
-    $t->test('dispatch uses custom exception handler', function () {
+    Test::it('should use custom exception handler', function () {
 
         $caught = null;
         $http = new Root(
@@ -197,7 +197,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertInstanceOf(RuntimeException::class, $caught);
     });
 
-    $t->test('head dispatch falls back to get handler', function () {
+    Test::it('should fall back to get handler', function () {
 
         $http = Http::create();
 
@@ -209,7 +209,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertSame(200, $status);
     });
 
-    $t->test('dispatch infers method and target from server globals', function () {
+    Test::it('should infer method and target from server globals', function () {
 
         $http = Http::create();
         $http->get('/auto', fn() => ['auto' => true]);
@@ -233,7 +233,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertSame(200, TestHarness::$status);
     });
 
-    $t->test('respond handles json encoding errors', function () {
+    Test::it('should handle JSON encoding errors', function () {
 
         $http = Http::create();
 
@@ -243,10 +243,10 @@ Test::suite('Http', function (Test $t) {
         $payload = decode($output);
 
         Test::assertSame(500, $status);
-        Test::assertSame(['ok' => false, 'error' => 'error_codificacion'], $payload);
+        Test::assertSame(['ok' => false, 'error' => 'encoding_error'], $payload);
     });
 
-    $t->test('matches evaluates nested paths', function () {
+    Test::it('should evaluate nested paths in matches', function () {
 
         $http = Http::create();
         $reflection = new \ReflectionClass($http);
@@ -257,7 +257,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertFalse($method->invoke($http, '/api', '/status'));
     });
 
-    $t->test('middleware runs for nested path prefixes', function () {
+    Test::it('should run for nested path prefixes', function () {
 
         $http = Http::create();
         $events = [];
@@ -279,7 +279,7 @@ Test::suite('Http', function (Test $t) {
         Test::assertSame(['ok' => true], $payload);
     });
 
-    $t->test('path middleware matches exact route', function () {
+    Test::it('should match exact route for path middleware', function () {
 
         $http = Http::create();
         $events = [];
@@ -302,10 +302,7 @@ Test::suite('Http', function (Test $t) {
     });
 });
 
-/**
- * @return array{0:string,1:int,2:array<int, array{0:string,1:bool,2:?int}>}
- */
-function dispatch(Root $http, string $method, string $target): array
+function dispatch(Root $http, string $method, string $target)
 {
     TestHarness::reset();
 
@@ -316,13 +313,9 @@ function dispatch(Root $http, string $method, string $target): array
     return [$output, TestHarness::$status ?? 200, TestHarness::$headers];
 }
 
-/**
- * @return array<string, mixed>
- */
-function decode(string $payload): array
+function decode(string $payload)
 {
     try {
-        /** @var array<string, mixed> $decoded */
         $decoded = json_decode($payload, true, 512, JSON_THROW_ON_ERROR);
     } catch (JsonException $exception) {
         Test::fail('Invalid JSON payload: ' . $exception->getMessage());

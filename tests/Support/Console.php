@@ -9,7 +9,7 @@ use Ajo\Core\Console as CoreConsole;
 use ReflectionClass;
 
 /**
- * Ejecuta un comando y devuelve código de salida, stdout y stderr capturados.
+ * Executes a command and returns captured exit code, stdout and stderr.
  *
  * @return array{0:int,1:string,2:string}
  */
@@ -77,9 +77,9 @@ function dispatch(
 }
 
 /**
- * Ejecuta un callback silenciando stdout/stderr de Console.
+ * Executes a callback silencing Console's stdout/stderr.
  *
- * @return array{0:string,1:string} contenidos capturados
+ * @return array{0:string,1:string} captured contents
  */
 function silence(callable $callback): array
 {

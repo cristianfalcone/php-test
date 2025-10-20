@@ -15,7 +15,7 @@ use ReflectionMethod;
 trait Facade
 {
   /**
-   * Resuelve el método estático como proxy al objeto subyacente.
+   * Resolves the static method as a proxy to the underlying object.
    */
   public static function __callStatic(string $method, array $arguments)
   {
@@ -29,7 +29,7 @@ trait Facade
 
         if (!$reflection->isPublic()) {
           throw new BadMethodCallException(sprintf(
-            "Método estático '%s' no disponible en fachada '%s'.",
+            "Static method '%s' not available on facade '%s'.",
             $method,
             static::class
           ));
@@ -47,7 +47,7 @@ trait Facade
 
       if (!$reflection->isPublic()) {
         throw new BadMethodCallException(sprintf(
-          "Método '%s' no disponible en fachada '%s'.",
+          "Method '%s' not available on facade '%s'.",
           $method,
           static::class
         ));
@@ -58,7 +58,7 @@ trait Facade
 
     if (!method_exists($instance, '__call')) {
       throw new BadMethodCallException(sprintf(
-        "Método '%s' no disponible en fachada '%s'.",
+        "Method '%s' not available on facade '%s'.",
         $method,
         static::class
       ));
@@ -68,7 +68,7 @@ trait Facade
   }
 
   /**
-   * Devuelve la instancia actualmente asociada a la fachada.
+   * Returns the instance currently associated with the facade.
    *
    * @return T
    */
@@ -85,7 +85,7 @@ trait Facade
   }
 
   /**
-   * Reemplaza temporalmente la instancia utilizada para resolver la fachada.
+   * Temporarily replaces the instance used to resolve the facade.
    *
    * @param T $instance
    */
@@ -95,7 +95,7 @@ trait Facade
 
     if (!$instance instanceof $root) {
       throw new InvalidArgumentException(sprintf(
-        "Instancia inválida para '%s'; se esperaba '%s'.",
+        "Invalid instance for '%s'; expected '%s'.",
         static::class,
         $root
       ));
@@ -105,7 +105,7 @@ trait Facade
   }
 
   /**
-   * Obtiene la clase concreta que representa la implementación.
+   * Gets the concrete class that represents the implementation.
    *
    * @return class-string<T>
    */

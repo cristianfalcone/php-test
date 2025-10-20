@@ -10,7 +10,7 @@ use ReflectionFunction;
 use RuntimeException;
 
 /**
- * Contenedor ultra liviano utilizado para compartir servicios o valores simples.
+ * Ultra-lightweight container used to share services or simple values.
  */
 final class Container
 {
@@ -108,7 +108,7 @@ final class Container
         return match ($reflection->getNumberOfParameters()) {
             0 => $closure(),
             1 => $closure($this),
-            default => throw new InvalidArgumentException('Las factories aceptan como máximo un parámetro (Container).'),
+            default => throw new InvalidArgumentException('Factories accept at most one parameter (Container).'),
         };
     }
 }

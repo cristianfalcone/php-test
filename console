@@ -7,32 +7,30 @@ use Ajo\Console;
 use Ajo\Container;
 use Ajo\Database;
 use Ajo\Test;
-// use Ajo\Job;
+use Ajo\Job;
 
 require __DIR__ . '/vendor/autoload.php';
 
-$cli = Console::create();
+Console::use(fn() => Container::set('db', Database::get()));
 
-$cli->use(fn () => Container::set('db', Database::get()));
+Job::register(Console::instance());
 
-// Job::register($cli);
+Job::schedule('* * * * *', function () {
+    Console::info('Sending pending emails...');
+})
+    ->name('emails.send')
+    ->queue('emails')
+    ->concurrency(3)
+    ->priority(10);
 
-// Job::schedule('* * * * *', function () {
-//     Console::info('Enviando emails pendientes...');
-// })
-//     ->name('emails.send')
-//     ->queue('emails')
-//     ->concurrency(3)
-//     ->priority(10);
+Job::schedule('0 2 * * *', function () {
+    Console::info('Daily report...');
+    // ...
+})
+    ->name('report.daily')
+    ->queue('reports')
+    ->priority(50);
 
-// Job::schedule('0 2 * * *', function () {
-//     Console::info('Reporte diario...');
-//     // ...
-// })
-//     ->name('report.daily')
-//     ->queue('reports')
-//     ->priority(50);
+Test::register(Console::instance());
 
-Test::register($cli, __DIR__ . '/tests');
-
-exit($cli->dispatch());
+exit(Console::dispatch());

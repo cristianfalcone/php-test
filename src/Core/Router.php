@@ -27,12 +27,7 @@ abstract class Router
         $this->exceptionHandler = $exceptionHandler ?? $this->defaultException();
     }
 
-    public static function create(
-        ?callable $notFoundHandler = null,
-        ?callable $exceptionHandler = null,
-    ): static {
-        return new static($notFoundHandler, $exceptionHandler);
-    }
+    // Factory methods are provided at the facade layer (Ajo\Router)
 
     public function use(string|callable $path, callable ...$handlers): static
     {
@@ -42,7 +37,7 @@ abstract class Router
         }
 
         if ($handlers === []) {
-            throw new InvalidArgumentException('Se requiere al menos un middleware.');
+            throw new InvalidArgumentException('At least one middleware is required.');
         }
 
         $prefix = $path === '*'
@@ -94,7 +89,7 @@ abstract class Router
         $required = $reflection->getNumberOfParameters();
 
         if ($required > 2) {
-            throw new InvalidArgumentException("Handler '{$reflection->getName()}' admite como máximo dos parámetros.");
+            throw new InvalidArgumentException("Handler '{$reflection->getName()}' accepts at most two parameters.");
         }
 
         $acceptsThrowable = false;
@@ -155,7 +150,7 @@ abstract class Router
                 ? function (?Throwable $error, callable $next) use ($callable) {
                     return $error === null ? $next(null) : $callable($error, $next);
                 }
-                : throw new InvalidArgumentException("Error handler '{$reflection->getName()}' debe aceptar Throwable como primer parámetro."),
+                : throw new InvalidArgumentException("Error handler '{$reflection->getName()}' must accept Throwable as first parameter."),
         };
     }
 

@@ -4,20 +4,20 @@ declare(strict_types=1);
 
 namespace Ajo;
 
-use Ajo\Core\Console as CoreConsole;
+use Ajo\Core\Console as Console;
 use Ajo\Core\Facade;
-use Ajo\Core\Job as CoreJob;
+use Ajo\Core\Job as Root;
 
 /**
- * @mixin CoreJob
+ * @mixin Root
  *
- * @method static CoreJob register(CoreConsole $cli)
- * @method static CoreJob schedule(string $cron, callable $handler)
- * @method static CoreJob name(string $name)
- * @method static CoreJob queue(?string $name)
- * @method static CoreJob concurrency(int $n)
- * @method static CoreJob priority(int $n)
- * @method static CoreJob lease(int $seconds)
+ * @method static Root register(Console $cli)
+ * @method static Root schedule(string $cron, callable $handler)
+ * @method static Root name(string $name)
+ * @method static Root queue(?string $name)
+ * @method static Root concurrency(int $n)
+ * @method static Root priority(int $n)
+ * @method static Root lease(int $seconds)
  * @method static int run()
  * @method static void forever(int $sleep = 5)
  * @method static void stop()
@@ -28,6 +28,6 @@ final class Job
 
     protected static function root(): string
     {
-        return CoreJob::class;
+        return Root::class;
     }
 }

@@ -5,7 +5,7 @@ APP_DIR=${APP_DIR:-/var/www}
 uid=${UID:-$(stat -c '%u' "$APP_DIR" 2>/dev/null || echo 0)}
 gid=${GID:-$(stat -c '%g' "$APP_DIR" 2>/dev/null || echo 0)}
 
-# fallback cuando el repo aparece como root (Docker Desktop, etc.)
+# fallback when repo appears as root (Docker Desktop, etc.)
 if [ "$uid" = "0" ]; then
     uid=1000
 fi

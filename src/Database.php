@@ -20,13 +20,13 @@ final class Database
 
         $host = self::env('DB_HOST', 'db');
         $port = (string)self::env('DB_PORT', '3306');
-        $database = self::env('DB_DATABASE');
-        $user = self::env('DB_USER');
-        $password = self::env('DB_PASSWORD');
+        $database = self::env('DB_DATABASE', 'app');
+        $user = self::env('DB_USER', 'appuser');
+        $password = self::env('DB_PASSWORD', 'apppass');
         $charset = self::env('DB_CHARSET', 'utf8mb4');
 
         if ($database === '' || $user === '') {
-            throw new RuntimeException('Configuración de base de datos incompleta: DB_DATABASE y DB_USER son obligatorios.');
+            throw new RuntimeException('Incomplete database configuration: DB_DATABASE and DB_USER are required.');
         }
 
         $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=%s', $host, $port, $database, $charset);

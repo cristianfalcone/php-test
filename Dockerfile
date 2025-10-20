@@ -1,36 +1,36 @@
 FROM php:8.2-fpm-alpine
 
-# Variables de build para extensiones
+# Build variables for extensions
 ARG APP_ENV=production
 
-# Paquetes de compilación y runtime para extensiones
+# Build and runtime packages for extensions
 RUN set -eux; \
-  apk add --no-cache --virtual .build-deps $PHPIZE_DEPS icu-dev linux-headers \
-  && apk add --no-cache icu-libs curl ca-certificates bash tzdata su-exec shadow \
-  # extensiones nativas
+  apk add --no-cache --virtual .build-deps $PHPIZE_DEPS icu-dev linux-headers libxml2-dev \
+  && apk add --no-cache icu-libs libxml2 curl ca-certificates bash tzdata su-exec shadow \
+  # native extensions
   && docker-php-ext-configure intl \
-  && docker-php-ext-install -j$(nproc) intl pcntl pdo_mysql \
-  # extensiones opcionales solo en desarrollo
+  && docker-php-ext-install -j$(nproc) intl pcntl pdo_mysql sysvsem sysvshm xml \
+  # optional extensions only in development
   && if [ "$APP_ENV" = "development" ]; then \
     pecl install xdebug pcov; \
     docker-php-ext-enable xdebug pcov; \
   fi \
   && docker-php-ext-enable opcache \
-  # limpiar
+  # cleanup
   && apk del .build-deps
 
-# Composer oficial
+# Official Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 # App
 WORKDIR /var/www
 COPY . /var/www
 
-# Entry point que alinea el usuario dentro del contenedor con el del host
+# Entry point that aligns the user inside the container with the host
 COPY docker/php/entrypoint.sh /usr/local/bin/entrypoint
 RUN chmod +x /usr/local/bin/entrypoint
 
-# Config extra de PHP (solo aplica en desarrollo)
+# Extra PHP config (only applies in development)
 COPY docker/php/conf.d/ /usr/local/etc/php/conf.d/
 RUN if [ "$APP_ENV" = "development" ]; then \
     mv /usr/local/etc/php/conf.d/development.ini /usr/local/etc/php/conf.d/99-development.ini; \
@@ -38,7 +38,7 @@ RUN if [ "$APP_ENV" = "development" ]; then \
     rm -f /usr/local/etc/php/conf.d/development.ini; \
   fi
 
-# www-data ownership (nginx compartirá volumen)
+# www-data ownership (nginx will share volume)
 RUN chown -R www-data:www-data /var/www
 
 EXPOSE 9000
