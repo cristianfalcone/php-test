@@ -7,274 +7,379 @@ namespace Ajo\Core;
 use Ajo\Core\Console as CoreConsole;
 use Ajo\Console;
 use Ajo\Container;
+use BadMethodCallException;
 use DateTimeImmutable;
 use PDO;
 use RuntimeException;
 use Throwable;
 
+/**
+ * Job scheduler with cron-based execution, concurrency control, and persistent state.
+ *
+ * Supports 5-field (minute precision) and 6-field (second precision) cron expressions.
+ * Manages job execution with database-backed state, leases, and error tracking.
+ */
 final class Job
 {
-    private array $jobs = [];
-    private ?int $active = null;
-    private bool $running = false;
-    private ?DateTimeImmutable $nextWake = null;
+    private const DB_DATETIME_FORMAT = 'Y-m-d H:i:s';
 
-    // PUBLIC API ============================================================
+    /** @var array<string, array> Job configurations (legacy format for test compatibility) */
+    private array $jobs = [];
+
+    private ?string $activeJobName = null;
+    public private(set) bool $running = false;
+    private ?DateTimeImmutable $nextWakeTime = null;
+    private ClockInterface $clock;
+
+    public function __construct(?ClockInterface $clock = null)
+    {
+        $this->clock = $clock ?? new SystemClock();
+    }
+
+    // PUBLIC API =============================================================
 
     /** Registers job commands in the CLI */
-    public function register(CoreConsole $cli)
+    public function register(CoreConsole $cli): self
     {
-        $cli->command('jobs:install', fn() => $this->install())->describe('Initializes the jobs state table.');
-        $cli->command('jobs:status', fn() => $this->status())->describe('Shows the current status of jobs.');
-        $cli->command('jobs:collect', function () {
-            $executed = $this->run();
-            $executed === 0 ? Console::info('No due jobs.') : Console::success("Executed {$executed} job(s).");
-            return 0;
-        })->describe('Executes due jobs.');
-        $cli->command('jobs:work', fn() => $this->forever() ?? 0)->describe('Runs jobs in the background.');
-        $cli->command('jobs:prune', fn() => $this->prune())->describe('Removes states of jobs not seen recently.');
+        $commands = [
+            'jobs:install' => [fn() => $this->install(), 'Initializes the jobs state table.'],
+            'jobs:status'  => [fn() => $this->status(),  'Shows the current status of jobs.'],
+            'jobs:collect' => [fn() => $this->collect(), 'Executes due jobs.'],
+            'jobs:work'    => [fn() => $this->forever(), 'Runs jobs in the background.'],
+            'jobs:prune'   => [fn() => $this->prune(),   'Removes states of jobs not seen recently.'],
+        ];
+
+        foreach ($commands as $name => [$handler, $description]) {
+            $cli->command($name, $handler)->describe($description);
+        }
 
         return $this;
     }
 
-    /** Registers a scheduled job */
-    public function schedule(string $cron, callable $handler)
+    /** Registers a scheduled job with a unique name and handler */
+    public function schedule(string $name, callable $handler): self
     {
-        $cron = trim($cron);
+        if (isset($this->jobs[$name])) throw new RuntimeException("Job '{$name}' is already defined.");
 
-        $this->jobs[] = [
-            'name'        => $this->hash($cron, null),
-            'cron'        => $cron,
+        $this->jobs[$name] = [
+            'cron'        => null,
             'queue'       => 'default',
             'concurrency' => 1,
             'priority'    => 100,
             'lease'       => 3600,
             'handler'     => $handler,
-            'parsed'      => $this->parse($cron),
-            'hash'        => null,
-            'custom'      => false,
+            'parsed'      => null,
+            'filters'     => [],
+            'before'      => [],
+            'success'     => [],
+            'error'       => [],
+            'after'       => [],
         ];
 
-        $this->active = array_key_last($this->jobs);
+        $this->activeJobName = $name;
 
         return $this;
     }
 
-    /** Sets a unique key for the active job */
-    public function key(string $key)
+    /** Sets an explicit cron expression for the active job */
+    public function cron(string $expression): self
     {
-        return $this->tap(function (array &$job) use ($key) {
+        return $this->modifyJob(function (array &$job) use ($expression): void {
 
-            $job['hash'] = trim($key);
+            $expression = trim($expression);
+            $parts = preg_split('/\s+/', $expression);
 
-            if (!$job['custom']) $job['name'] = $this->hash($job['cron'], $job['hash']);
+            // Normalize to 6-field by prepending '0' if 5-field
+            if ($parts !== false && count($parts) === 5) $expression = '0 ' . $expression;
+
+            $job['cron'] = $expression;
+            $job['parsed'] = CronParser::parse($job['cron']);
         });
     }
 
-    /** Sets an explicit name for the active job */
-    public function name(string $name)
+    /**
+     * Dynamic dispatcher for frequency helper methods
+     *
+     * @method self everySecond()
+     * @method self everyTwoSeconds()
+     * @method self everyFiveSeconds()
+     * @method self everyTenSeconds()
+     * @method self everyFifteenSeconds()
+     * @method self everyTwentySeconds()
+     * @method self everyThirtySeconds()
+     * @method self everyMinute()
+     * @method self everyTwoMinutes()
+     * @method self everyThreeMinutes()
+     * @method self everyFourMinutes()
+     * @method self everyFiveMinutes()
+     * @method self everyTenMinutes()
+     * @method self everyFifteenMinutes()
+     * @method self everyThirtyMinutes()
+     * @method self hourly()
+     * @method self everyTwoHours()
+     * @method self everyThreeHours()
+     * @method self everyFourHours()
+     * @method self everySixHours()
+     * @method self daily()
+     * @method self weekly()
+     * @method self monthly()
+     * @method self quarterly()
+     * @method self yearly()
+     * @method self weekdays()
+     * @method self weekends()
+     * @method self sundays()
+     * @method self mondays()
+     * @method self tuesdays()
+     * @method self wednesdays()
+     * @method self thursdays()
+     * @method self fridays()
+     * @method self saturdays()
+     */
+    public function __call(string $name, array $args): self
     {
-        return $this->tap(function (array &$job) use ($name) {
-            $job['name'] = $name;
-            $job['custom'] = true;
+        $frequencies = [
+            // Second-based
+            'everySecond'        => '* * * * * *',
+            'everyTwoSeconds'    => '*/2 * * * * *',
+            'everyFiveSeconds'   => '*/5 * * * * *',
+            'everyTenSeconds'    => '*/10 * * * * *',
+            'everyFifteenSeconds' => '*/15 * * * * *',
+            'everyTwentySeconds' => '*/20 * * * * *',
+            'everyThirtySeconds' => '*/30 * * * * *',
+            // Minute-based
+            'everyMinute'        => '0 * * * * *',
+            'everyTwoMinutes'    => '0 */2 * * * *',
+            'everyThreeMinutes'  => '0 */3 * * * *',
+            'everyFourMinutes'   => '0 */4 * * * *',
+            'everyFiveMinutes'   => '0 */5 * * * *',
+            'everyTenMinutes'    => '0 */10 * * * *',
+            'everyFifteenMinutes' => '0 */15 * * * *',
+            'everyThirtyMinutes' => '0 */30 * * * *',
+            // Hour-based
+            'hourly'             => '0 0 * * * *',
+            'everyTwoHours'      => '0 0 */2 * * *',
+            'everyThreeHours'    => '0 0 */3 * * *',
+            'everyFourHours'     => '0 0 */4 * * *',
+            'everySixHours'      => '0 0 */6 * * *',
+            // Day-based
+            'daily'              => '0 0 0 * * *',
+            'weekly'             => '0 0 0 * * 0',
+            'monthly'            => '0 0 0 1 * *',
+            'quarterly'          => '0 0 0 1 */3 *',
+            'yearly'             => '0 0 0 1 1 *',
+            'weekdays'           => '0 0 0 * * 1-5',
+            'weekends'           => '0 0 0 * * 0,6',
+            'sundays'            => '0 0 0 * * 0',
+            'mondays'            => '0 0 0 * * 1',
+            'tuesdays'           => '0 0 0 * * 2',
+            'wednesdays'         => '0 0 0 * * 3',
+            'thursdays'          => '0 0 0 * * 4',
+            'fridays'            => '0 0 0 * * 5',
+            'saturdays'          => '0 0 0 * * 6',
+        ];
+
+        if (isset($frequencies[$name])) return $this->cron($frequencies[$name]);
+
+        throw new BadMethodCallException("Method {$name} does not exist on " . self::class);
+    }
+
+    /** Limits execution to specific second(s) */
+    public function second(int|array $seconds): self
+    {
+        return $this->modifyCron(0, $seconds);
+    }
+
+    /** Limits execution to specific minute(s) */
+    public function minute(int|array $minutes): self
+    {
+        return $this->modifyCron(1, $minutes);
+    }
+
+    /** Limits execution to specific hour(s) */
+    public function hour(int|array $hours): self
+    {
+        return $this->modifyCron(2, $hours);
+    }
+
+    /** Limits execution to specific day(s) of the month */
+    public function day(int|array $days): self
+    {
+        return $this->modifyCron(3, $days);
+    }
+
+    /** Limits execution to specific month(s) */
+    public function month(int|array $months): self
+    {
+        return $this->modifyCron(4, $months);
+    }
+
+    /** Helper to modify a specific cron field */
+    private function modifyCron(int $fieldIndex, int|array $values): self
+    {
+        return $this->modifyJob(function (array &$job) use ($fieldIndex, $values): void {
+
+            $parts = explode(' ', $job['cron'] ??= '0 0 0 * * *');
+
+            if (count($parts) === 6) {
+                $parts[$fieldIndex] = is_array($values) ? implode(',', $values) : (string)$values;
+                $job['cron'] = implode(' ', $parts);
+                $job['parsed'] = CronParser::parse($job['cron']);
+            }
         });
+    }
+
+    /** Execute job only when callback returns true (can be called multiple times, all must pass) */
+    public function when(callable $callback): self
+    {
+        return $this->modifyJob(fn(array &$job) => $job['filters'][] = $callback);
+    }
+
+    /** Skip job execution when callback returns true (can be called multiple times, any can skip) */
+    public function skip(callable $callback): self
+    {
+        return $this->modifyJob(fn(array &$job) => $job['filters'][] = fn() => !$callback());
     }
 
     /** Sets the queue for the active job */
-    public function queue(?string $name)
+    public function queue(?string $name): self
     {
-        return $this->tap(fn(array &$job) => $job['queue'] = $name ?: 'default');
+        return $this->modifyJob(fn(array &$job) => $job['queue'] = $name ?: 'default');
     }
 
     /** Sets concurrency limit for the active job */
-    public function concurrency(int $n)
+    public function concurrency(int $n): self
     {
-        return $this->tap(fn(array &$job) => $job['concurrency'] = max(1, $n));
+        return $this->modifyJob(fn(array &$job) => $job['concurrency'] = max(1, $n));
     }
 
     /** Sets execution priority for the active job */
-    public function priority(int $n)
+    public function priority(int $n): self
     {
-        return $this->tap(fn(array &$job) => $job['priority'] = $n);
+        return $this->modifyJob(fn(array &$job) => $job['priority'] = $n);
     }
 
-    /** Sets lease duration in seconds for the active job */
-    public function lease(int $seconds)
+    /** Sets lease duration in seconds for the active job (minimum 60) */
+    public function lease(int $seconds): self
     {
-        return $this->tap(fn(array &$job) => $job['lease'] = max(60, $seconds));
+        return $this->modifyJob(fn(array &$job) => $job['lease'] = max(60, $seconds));
+    }
+
+    /** Adds a hook to execute before the job handler */
+    public function onBefore(callable $callback): self
+    {
+        return $this->addHook('before', $callback);
+    }
+
+    /** Adds a hook to execute after successful job execution */
+    public function onSuccess(callable $callback): self
+    {
+        return $this->addHook('success', $callback);
+    }
+
+    /** Adds a hook to execute when job throws an exception (receives Throwable) */
+    public function onError(callable $callback): self
+    {
+        return $this->addHook('error', $callback);
+    }
+
+    /** Adds a hook to always execute after the job (finally block) */
+    public function onAfter(callable $callback): self
+    {
+        return $this->addHook('after', $callback);
+    }
+
+    /** Dispatches a job to execute ASAP (enqueues it) */
+    public function dispatch(string $name, ?callable $handler = null): self
+    {
+        if (!isset($this->jobs[$name])) {
+
+            if (!$handler) throw new RuntimeException("Job '{$name}' not found and no handler provided.");
+
+            $this->schedule($name, $handler)->queue('default');
+        }
+
+        $this->prepareDatabase();
+
+        $this->updateJobState($name, [
+            'enqueued_at' => $this->nowAsDbString(),
+            'last_run' => null,
+            'lease_until' => null,
+        ]);
+
+        return $this;
     }
 
     /** Stops the background worker */
-    public function stop()
+    public function stop(): void
     {
         $this->running = false;
     }
 
-    // EXECUTION =============================================================
+    // EXECUTION ==============================================================
 
-    /** Executes all due jobs once */
-    public function run()
+    /** Executes all due jobs once and returns count of executed jobs */
+    public function run(): int
     {
-        $this->ensure();
-        $this->sync();
-        $this->nextWake = null;
+        $this->prepareDatabase();
+        $this->nextWakeTime = null;
 
-        $result = $this->withLock('jobs:collect', function () {
+        $result = $this->selectDueJobs();
 
-            $jobs = array_column($this->jobs, null, 'name');
+        $this->nextWakeTime = $result['next'];
 
-            if ($jobs === []) return ['selected' => [], 'next' => null];
-
-            $now = new DateTimeImmutable('now');
-            $rows = $this->fetch(array_keys($jobs));
-
-            // Build pool of due jobs and track queue concurrency
-            $pool = [];
-            $limit = [];
-            $busy = [];
-            $next = null;
-
-            foreach ($rows as $row) {
-
-                $job = $jobs[$row['name']] ?? null;
-
-                if (!$job) continue;
-
-                $queue = $job['queue'];
-                $limit[$queue] = max($limit[$queue] ?? 1, $job['concurrency']);
-
-                // Skip if lease is still active
-                $leaseUntil = ($row['lease_until'] ?? null) ? new DateTimeImmutable($row['lease_until']) : null;
-
-                if ($leaseUntil && $leaseUntil > $now) {
-                    $busy[$queue] = ($busy[$queue] ?? 0) + 1;
-                    $next = $this->earliest($next, $leaseUntil);
-                    continue;
-                }
-
-                // Check if job is due
-                $lastRun = ($row['last_run'] ?? null) ? new DateTimeImmutable($row['last_run']) : null;
-                $status = $this->evaluate($job['parsed'], $now, $lastRun);
-                $next = $this->earliest($next, $status['next']);
-
-                if ($status['due']) $pool[] = ['row' => $row, 'job' => $job, 'queue' => $queue];
-            }
-
-            if ($pool === []) return ['selected' => [], 'next' => $next];
-
-            // Sort by priority, then by name
-            usort($pool, static fn($a, $b) =>
-                ($a['job']['priority'] <=> $b['job']['priority']) ?: strcmp($a['row']['name'], $b['row']['name'])
-            );
-
-            // Select jobs respecting concurrency limits per queue
-            $selected = [];
-
-            foreach ($pool as $candidate) {
-
-                $queue = $candidate['queue'];
-
-                // Skip if queue is at capacity
-                if (($busy[$queue] ?? 0) >= ($limit[$queue] ?? 1)) {
-                    $next = $this->earliest($next, $now);
-                    continue;
-                }
-
-                // Acquire lease
-                $leaseUntil = $now->modify('+' . $candidate['job']['lease'] . ' seconds')->format('Y-m-d H:i:s');
-                $this->update($candidate['row']['name'], ['lease_until' => $leaseUntil]);
-
-                $selected[] = $candidate;
-                $busy[$queue] = ($busy[$queue] ?? 0) + 1;
-            }
-
-            return ['selected' => $selected, 'next' => $next];
-        });
-
-        if ($result === null) return 0;
-
-        $this->nextWake = $result['next'];
-
-        foreach ($result['selected'] as $entry) {
-            $this->execute($entry['job'], $entry['row']['name']);
-        }
+        foreach ($result['selected'] as $entry) $this->executeJob($entry['job'], $entry['row']['name']);
 
         return count($result['selected']);
     }
 
     /** Runs jobs continuously in the background */
-    public function forever()
+    public function forever(): int
     {
         Console::info('Job execution started...');
-
-        $restore = $this->trapSignals();
+        $restoreSignals = $this->trapSignals();
         $this->running = true;
 
         try {
             while ($this->running) {
-
                 $this->dispatchSignals();
-
                 if (!$this->running) break;
-
                 $executed = $this->run();
-
                 $this->dispatchSignals();
-
                 if (!$this->running) break;
-
-                if ($executed === 0) {
-                    $this->sleepUntilNext();
-                }
+                if ($executed === 0) $this->sleepUntilNext();
             }
         } finally {
             $this->running = false;
-            $restore();
+            $restoreSignals();
             Console::info('Job worker stopped.');
         }
+
+        return 0;
     }
 
-    /** Executes a single job handler and updates state */
-    private function execute(array $job, string $name)
+    // COMMANDS ===============================================================
+
+    private function install(): int
     {
-        try {
-            ($job['handler'])();
-
-            $stamp = (new DateTimeImmutable('now'))->format('Y-m-d H:i:s');
-            $this->update($name, ['last_run' => $stamp, 'lease_until' => null, 'last_error' => null]);
-
-            Console::success("{$name}: {$job['cron']}");
-        } catch (Throwable $e) {
-
-            $stamp = (new DateTimeImmutable('now'))->format('Y-m-d H:i:s');
-
-            $this->pdo()->prepare("
-                UPDATE jobs
-                   SET last_run = :run, lease_until = NULL, last_error = :err, fail_count = fail_count + 1
-                 WHERE name = :name
-            ")->execute([':run' => $stamp, ':err' => $e->getMessage(), ':name' => $name]);
-
-            Console::error("{$name}: " . $e->getMessage());
-        }
-    }
-
-    // COMMANDS ==============================================================
-
-    /** Initializes the jobs table */
-    private function install()
-    {
-        $this->ensure();
-        $this->sync();
+        $this->prepareDatabase();
         Console::success('Table ready.');
         return 0;
     }
 
-    /** Shows current status of all jobs */
-    private function status()
+    private function collect(): int
     {
-        $this->ensure();
+        $executed = $this->run();
+        $executed === 0
+            ? Console::info('No due jobs.')
+            : Console::success("Executed {$executed} job(s).");
+        return 0;
+    }
 
-        $rows = $this->fetchAll();
+    private function status(): int
+    {
+        $this->ensureTableExists();
+
+        $rows = $this->fetchAllJobs();
 
         if ($rows === []) {
             Console::log('Defined: 0 | Running: 0 | Idle: 0');
@@ -283,32 +388,41 @@ final class Job
             return 0;
         }
 
-        $jobs = array_column($this->jobs, null, 'name');
-        $now = new DateTimeImmutable('now');
+        $now = $this->clock->now();
+        $active = count(array_filter(
+            $rows,
+            fn($r) => ($r['lease_until'] ?? null) && new DateTimeImmutable($r['lease_until']) > $now
+        ));
 
-        $active = array_reduce($rows, fn(int $c, array $r): int =>
-            $c + (($r['lease_until'] ?? null) && new DateTimeImmutable($r['lease_until']) > $now ? 1 : 0), 0
-        );
-
-        Console::log(sprintf('Defined: %d | Running: %d | Idle: %d', count($rows), $active, max(0, count($rows) - $active)));
+        Console::log(sprintf(
+            'Defined: %d | Running: %d | Idle: %d',
+            count($rows),
+            $active,
+            count($rows) - $active
+        ));
         Console::blank();
 
-        $this->render($rows, $jobs, $now);
+        $this->renderJobTable($rows, $now);
 
         return 0;
     }
 
-    /** Removes stale job states from database */
-    private function prune(int $days = 30)
+    private function prune(int $days = 30): int
     {
-        $this->ensure();
+        $this->ensureTableExists();
 
-        $result = $this->withLock('jobs:prune', function () use ($days) {
-            $cutoff = (new DateTimeImmutable('now'))->modify('-' . max(0, $days) . ' days')->format('Y-m-d H:i:s');
+        $result = $this->withDatabaseLock('jobs:prune', function () use ($days) {
+
+            $cutoff = $this->clock->now()
+                ->modify('-' . max(0, $days) . ' days')
+                ->format(self::DB_DATETIME_FORMAT);
+
             $stmt = $this->pdo()->prepare("
                 DELETE FROM jobs
-                 WHERE (seen_at IS NULL OR seen_at < :cutoff) AND (lease_until IS NULL OR lease_until < NOW())
+                 WHERE (seen_at IS NULL OR seen_at < :cutoff)
+                   AND (lease_until IS NULL OR lease_until < NOW())
             ");
+
             $stmt->execute([':cutoff' => $cutoff]);
 
             Console::success("Pruned {$stmt->rowCount()} job state(s).");
@@ -316,267 +430,140 @@ final class Job
             return true;
         });
 
-        if ($result === null) {
-            Console::info('Prune skipped: another process holds the lock.');
-        }
+        if ($result === null) Console::info('Prune skipped: another process holds the lock.');
 
         return 0;
     }
 
-    // CRON EVALUATION =======================================================
+    // JOB SELECTION & EXECUTION ==============================================
 
-    /** Determines if a job is due and calculates next run time */
-    private function evaluate(array $parsed, DateTimeImmutable $now, ?DateTimeImmutable $lastRun)
+    /** Selects jobs that are due and not blocked by concurrency limits */
+    private function selectDueJobs(): array
     {
-        $matches = $this->matches($parsed, $now);
-        $due = false;
+        if ($this->jobs === []) return ['selected' => [], 'next' => null];
 
-        if ($matches) {
-            if ($parsed['hasSeconds']) {
-                $due = !$lastRun || $lastRun->format('Y-m-d H:i:s') !== $now->format('Y-m-d H:i:s');
-            } else {
-                $current = $now->setTime((int)$now->format('H'), (int)$now->format('i'), 0);
-                $previous = $lastRun ? $lastRun->setTime((int)$lastRun->format('H'), (int)$lastRun->format('i'), 0) : null;
-                $due = !$previous || $previous->format('Y-m-d H:i:s') !== $current->format('Y-m-d H:i:s');
-            }
-        }
+        $now = $this->clock->now();
+        $rows = $this->fetchJobs(array_keys($this->jobs));
 
-        return ['next' => $this->nextMatch($parsed, $now), 'due' => $due];
-    }
-
-    /** Checks if a moment matches a cron expression */
-    private function matches(array $parsed, DateTimeImmutable $moment)
-    {
-        $minute = (int)$moment->format('i');
-        $hour = (int)$moment->format('G');
-        $dom = (int)$moment->format('j');
-        $mon = (int)$moment->format('n');
-        $dow = (int)$moment->format('w');
-
-        if (!isset($parsed['min']['map'][$minute], $parsed['hour']['map'][$hour], $parsed['mon']['map'][$mon])) {
-            return false;
-        }
-
-        if ($parsed['hasSeconds'] && !isset($parsed['sec']['map'][(int)$moment->format('s')])) {
-            return false;
-        }
-
-        $domMatch = isset($parsed['dom']['map'][$dom]);
-        $dowMatch = isset($parsed['dow']['map'][$dow]);
-
-        return match (true) {
-            $parsed['domStar'] && $parsed['dowStar'] => true,
-            $parsed['domStar'] => $dowMatch,
-            $parsed['dowStar'] => $domMatch,
-            default => $domMatch || $dowMatch,
-        };
-    }
-
-    /** Parses a cron expression into an array structure */
-    private function parse(string $expression)
-    {
-        $tokens = preg_split('/\s+/', trim($expression));
-
-        if ($tokens === false || count($tokens) < 5 || count($tokens) > 6) {
-            throw new RuntimeException("Invalid cron expression: {$expression}");
-        }
-
-        // Expands a cron field (e.g., "*/5", "1-3", "1,2,3") into a map and list
-        $expand = function (string $field, int $min, int $max, bool $isDow) {
-
-            $field = trim($field);
-            $field = $field === '' ? '*' : $field;
-            $seen = [];
-            $clamp = fn(int $v) => $isDow && $v === 7 ? 0 : max($min, min($max, $v));
-
-            foreach (explode(',', $field) as $part) {
-
-                $part = trim($part);
-
-                if ($part === '') continue;
-
-                [$range, $step] = str_contains($part, '/') ? explode('/', $part, 2) : [$part, '1'];
-
-                $step = max(1, (int)$step);
-
-                if ($range === '*') {
-                    // Use array keys for O(1) deduplication
-                    for ($v = $min; $v <= $max; $v += $step) $seen[$v] = true;
-                } elseif (str_contains($range, '-')) {
-                    [$start, $end] = array_map('intval', explode('-', $range, 2));
-                    [$start, $end] = [$clamp($start), $clamp($end)];
-                    if ($start > $end) [$start, $end] = [$end, $start];
-                    for ($v = $start; $v <= $end; $v += $step) $seen[$v] = true;
-                } else {
-                    $seen[$clamp((int)$range)] = true;
-                }
-            }
-
-            $values = $seen !== [] ? array_keys($seen) : range($min, $max);
-
-            sort($values, SORT_NUMERIC);
-
-            return ['map' => array_fill_keys($values, true), 'list' => $values];
-        };
-
-        // Parse 5-field (minute precision) or 6-field (second precision)
-        if (count($tokens) === 5) {
-            [$min, $hour, $dom, $mon, $dow] = $tokens;
-            [$sec, $hasSeconds] = ['0', false];
-        } else {
-            [$sec, $min, $hour, $dom, $mon, $dow] = $tokens;
-            $hasSeconds = true;
-        }
+        $candidates = $this->buildCandidatePool($rows, $now);
+        $selected = $this->acquireLeases($candidates, $now);
 
         return [
-            'hasSeconds' => $hasSeconds,
-            'sec' => $expand($sec, 0, 59, false),
-            'min' => $expand($min, 0, 59, false),
-            'hour' => $expand($hour, 0, 23, false),
-            'dom' => $expand($dom, 1, 31, false),
-            'mon' => $expand($mon, 1, 12, false),
-            'dow' => $expand($dow, 0, 6, true),
-            'domStar' => ($dom === '*'),
-            'dowStar' => ($dow === '*'),
+            'selected' => $selected['jobs'],
+            'next' => $selected['next'] ?? $candidates['next'],
         ];
     }
 
-    /** Calculates the next time a cron expression will match using incremental field-by-field algorithm */
-    private function nextMatch(array $parsed, DateTimeImmutable $from)
+    /** Builds pool of due jobs and tracks queue concurrency */
+    private function buildCandidatePool(array $rows, DateTimeImmutable $now): array
     {
-        // Start from next second/minute
-        $current = $parsed['hasSeconds'] ? $from->modify('+1 second') : $from->modify('+1 minute');
+        $pool = [];
+        $queueLimits = [];
+        $queueBusy = [];
+        $nextWake = null;
 
-        if (!$parsed['hasSeconds']) {
-            $current = $current->setTime((int)$current->format('H'), (int)$current->format('i'), 0);
+        foreach ($rows as $row) {
+
+            $job = $this->jobs[$row['name']] ?? null;
+
+            if (!$job) continue;
+
+            $queue = $job['queue'];
+            $queueLimits[$queue] = max($queueLimits[$queue] ?? 1, $job['concurrency']);
+
+            // Check if lease is still active
+            $leaseUntil = ($row['lease_until'] ?? null) ? new DateTimeImmutable($row['lease_until']) : null;
+
+            if ($leaseUntil && $leaseUntil > $now) {
+                $queueBusy[$queue] = ($queueBusy[$queue] ?? 0) + 1;
+                $nextWake = $this->earliestTime($nextWake, $leaseUntil);
+                continue;
+            }
+
+            // Check if job is due (scheduled) or dispatched
+            $isDispatched = !empty($row['enqueued_at']);
+
+            if ($isDispatched) {
+                $pool[] = ['row' => $row, 'job' => $job, 'queue' => $queue];
+            } else {
+
+                $lastRun = ($row['last_run'] ?? null) ? new DateTimeImmutable($row['last_run']) : null;
+                $status = CronEvaluator::evaluate($job['parsed'], $now, $lastRun);
+                $nextWake = $this->earliestTime($nextWake, $status['next']);
+
+                if ($status['due']) {
+                    $pool[] = ['row' => $row, 'job' => $job, 'queue' => $queue];
+                }
+            }
         }
 
-        $maxYear = (int)$current->format('Y') + 5;
-
-        // Binary search for next valid value in sorted list - O(log n) instead of O(n)
-        $nextIn = static function (array $list, int $val): ?int {
-            $left = 0;
-            $right = count($list) - 1;
-
-            while ($left <= $right) {
-                $mid = ($left + $right) >> 1;
-                if ($list[$mid] < $val) {
-                    $left = $mid + 1;
-                } else {
-                    $right = $mid - 1;
-                }
-            }
-
-            return $list[$left] ?? null;
-        };
-
-        // Check if day matches both day-of-month and day-of-week constraints
-        $dayMatches = fn(int $d, DateTimeImmutable $date) => match (true) {
-            $parsed['domStar'] && $parsed['dowStar'] => true,
-            $parsed['domStar'] => isset($parsed['dow']['map'][(int)$date->format('w')]),
-            $parsed['dowStar'] => isset($parsed['dom']['map'][$d]),
-            default => isset($parsed['dom']['map'][$d]) || isset($parsed['dow']['map'][(int)$date->format('w')]),
-        };
-
-        // Incremental field-by-field search - adjust current until all fields match
-        for ($attempts = 0; $attempts < 10000; $attempts++) {
-
-            [$year, $month, $day, $hour, $minute, $second] = [
-                (int)$current->format('Y'), (int)$current->format('n'), (int)$current->format('j'),
-                (int)$current->format('G'), (int)$current->format('i'), (int)$current->format('s'),
-            ];
-
-            if ($year > $maxYear) {
-                throw new RuntimeException('Unable to compute next cron match within 5 years.');
-            }
-
-            // Check month
-            if (!isset($parsed['mon']['map'][$month])) {
-                $nextMonth = $nextIn($parsed['mon']['list'], $month);
-                $current = $nextMonth
-                    ? $current->setDate($year, $nextMonth, 1)
-                    : $current->setDate($year + 1, $parsed['mon']['list'][0], 1);
-                $current = $current->setTime($parsed['hour']['list'][0], $parsed['min']['list'][0], $parsed['hasSeconds'] ? $parsed['sec']['list'][0] : 0);
-                continue;
-            }
-
-            // Check day (considering both DOM and DOW)
-            if (!$dayMatches($day, $current)) {
-                $found = false;
-                $daysInMonth = (int)$current->format('t');
-                for ($d = $day + 1; $d <= $daysInMonth; $d++) {
-                    $testDate = $current->setDate($year, $month, $d);
-                    if ($dayMatches($d, $testDate)) {
-                        $current = $testDate->setTime($parsed['hour']['list'][0], $parsed['min']['list'][0], $parsed['hasSeconds'] ? $parsed['sec']['list'][0] : 0);
-                        $found = true;
-                        break;
-                    }
-                }
-                if (!$found) {
-                    // No valid day this month, advance to next month
-                    $nextMonth = $nextIn($parsed['mon']['list'], $month + 1);
-                    $current = $nextMonth
-                        ? $current->setDate($year, $nextMonth, 1)
-                        : $current->setDate($year + 1, $parsed['mon']['list'][0], 1);
-                    $current = $current->setTime($parsed['hour']['list'][0], $parsed['min']['list'][0], $parsed['hasSeconds'] ? $parsed['sec']['list'][0] : 0);
-                }
-                continue;
-            }
-
-            // Check hour
-            if (!isset($parsed['hour']['map'][$hour])) {
-                $nextHour = $nextIn($parsed['hour']['list'], $hour);
-                if ($nextHour) {
-                    $current = $current->setTime($nextHour, $parsed['min']['list'][0], $parsed['hasSeconds'] ? $parsed['sec']['list'][0] : 0);
-                } else {
-                    $current = $current->modify('+1 day')->setTime($parsed['hour']['list'][0], $parsed['min']['list'][0], $parsed['hasSeconds'] ? $parsed['sec']['list'][0] : 0);
-                }
-                continue;
-            }
-
-            // Check minute
-            if (!isset($parsed['min']['map'][$minute])) {
-                $nextMinute = $nextIn($parsed['min']['list'], $minute);
-                if ($nextMinute) {
-                    $current = $current->setTime($hour, $nextMinute, $parsed['hasSeconds'] ? $parsed['sec']['list'][0] : 0);
-                } else {
-                    $current = $current->modify('+1 hour')->setTime((int)$current->format('G'), $parsed['min']['list'][0], $parsed['hasSeconds'] ? $parsed['sec']['list'][0] : 0);
-                }
-                continue;
-            }
-
-            // Check second (if applicable)
-            if ($parsed['hasSeconds'] && !isset($parsed['sec']['map'][$second])) {
-                $nextSecond = $nextIn($parsed['sec']['list'], $second);
-                if ($nextSecond) {
-                    $current = $current->setTime($hour, $minute, $nextSecond);
-                } else {
-                    $current = $current->modify('+1 minute');
-                }
-                continue;
-            }
-
-            // All fields match!
-            return $current;
-        }
-
-        throw new RuntimeException('Next cron match calculation exceeded maximum iterations.');
+        return [
+            'pool' => $pool,
+            'limits' => $queueLimits,
+            'busy' => $queueBusy,
+            'next' => $nextWake,
+        ];
     }
 
-    // DATABASE ==============================================================
+    /** Acquires leases for jobs respecting concurrency limits */
+    private function acquireLeases(array $candidates, DateTimeImmutable $now): array
+    {
+        $selected = [];
+        $queueBusy = $candidates['busy'];
 
-    /** Returns the PDO connection from the container */
-    private function pdo()
+        foreach ($candidates['pool'] as $entry) {
+
+            $queue = $entry['queue'];
+
+            // Skip if queue is at capacity
+            if (($queueBusy[$queue] ?? 0) >= ($candidates['limits'][$queue] ?? 1)) continue;
+
+            // Atomically acquire lease (prevents race conditions with multiple workers)
+            if ($this->acquireLease($entry['row']['name'], $entry['job']['lease'])) {
+                $selected[] = $entry;
+                $queueBusy[$queue] = ($queueBusy[$queue] ?? 0) + 1;
+            }
+        }
+
+        return ['jobs' => $selected, 'next' => $candidates['next']];
+    }
+
+    /** Executes a single job handler and updates state */
+    private function executeJob(array $job, string $name): void
+    {
+        // Check all filters - all must return true to execute
+        if (!array_all($job['filters'], fn($filter) => $filter())) return;
+
+        try {
+            $this->runHooks($job['before']);
+            ($job['handler'])();
+            $this->runHooks($job['success']);
+            $this->recordJobSuccess($name, $job);
+        } catch (Throwable $e) {
+            $this->runHooks($job['error'], $e);
+            $this->recordJobFailure($name, $e);
+        } finally {
+            $this->runHooks($job['after']);
+        }
+    }
+
+    // DATABASE OPERATIONS ====================================================
+
+    private function pdo(): PDO
     {
         $pdo = Container::get('db');
-        if (!$pdo instanceof PDO) {
-            throw new RuntimeException('No database connection available.');
-        }
+        if (!$pdo instanceof PDO) throw new RuntimeException('No database connection available.');
         return $pdo;
     }
 
-    /** Creates the jobs table if it doesn't exist */
-    private function ensure()
+    /** Ensures table exists and syncs current jobs to database */
+    private function prepareDatabase(): void
+    {
+        $this->ensureTableExists();
+        $this->syncJobsToDatabase();
+    }
+
+    private function ensureTableExists(): void
     {
         $this->pdo()->exec("
             CREATE TABLE IF NOT EXISTS jobs (
@@ -586,61 +573,105 @@ final class Job
                 last_error TEXT NULL,
                 fail_count INT NOT NULL DEFAULT 0,
                 seen_at DATETIME NULL,
+                priority INT NOT NULL DEFAULT 100,
+                enqueued_at DATETIME NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 KEY idx_jobs_lease (lease_until),
-                KEY idx_jobs_seen (seen_at)
+                KEY idx_jobs_seen (seen_at),
+                KEY idx_jobs_priority (priority ASC, enqueued_at ASC)
             )
         ");
     }
 
-    /** Syncs registered jobs with the database */
-    private function sync()
+    private function syncJobsToDatabase(): void
     {
         if ($this->jobs === []) return;
 
-        $now = (new DateTimeImmutable('now'))->format('Y-m-d H:i:s');
+        $now = $this->nowAsDbString();
         $stmt = $this->pdo()->prepare("
-            INSERT INTO jobs (name, seen_at) VALUES (:name, :seen)
-            ON DUPLICATE KEY UPDATE seen_at = VALUES(seen_at)
+            INSERT INTO jobs (name, seen_at, priority) VALUES (:name, :seen, :priority)
+            ON DUPLICATE KEY UPDATE seen_at = VALUES(seen_at), priority = VALUES(priority)
         ");
 
-        foreach ($this->jobs as $job) {
-            $stmt->execute([':name' => $job['name'], ':seen' => $now]);
+        foreach ($this->jobs as $name => $job) {
+            $stmt->execute([
+                ':name' => $name,
+                ':seen' => $now,
+                ':priority' => $job['priority'],
+            ]);
         }
     }
 
-    /** Fetches job rows by name */
-    private function fetch(array $names)
+    private function fetchJobs(array $names): array
     {
         if ($names === []) return [];
 
         $placeholders = implode(',', array_fill(0, count($names), '?'));
-        $stmt = $this->pdo()->prepare("SELECT * FROM jobs WHERE name IN ($placeholders)");
+
+        $stmt = $this->pdo()->prepare("
+            SELECT * FROM jobs
+            WHERE name IN ($placeholders)
+            ORDER BY priority ASC, enqueued_at ASC, name ASC
+        ");
+
         $stmt->execute(array_values($names));
 
         return $stmt->fetchAll();
     }
 
-    /** Fetches all job rows */
-    private function fetchAll()
+    private function fetchAllJobs(): array
     {
-        $stmt = $this->pdo()->query("SELECT * FROM jobs ORDER BY name ASC");
-        return $stmt ? $stmt->fetchAll() : [];
+        $result = $this->pdo()->query("SELECT * FROM jobs ORDER BY name ASC");
+        return $result ? $result->fetchAll() : [];
     }
 
-    /** Updates job row fields */
-    private function update(string $name, array $fields)
+    private function updateJobState(string $name, array $fields): void
     {
         if ($fields === []) return;
 
         $sets = implode(', ', array_map(fn($k) => "{$k} = :{$k}", array_keys($fields)));
-        $params = array_combine(array_map(fn($k) => ":{$k}", array_keys($fields)), array_values($fields));
-        $this->pdo()->prepare("UPDATE jobs SET {$sets} WHERE name = :name")->execute([...$params, ':name' => $name]);
+
+        $params = array_combine(
+            array_map(fn($k) => ":{$k}", array_keys($fields)),
+            array_values($fields)
+        );
+
+        $this->pdo()
+            ->prepare("UPDATE jobs SET {$sets} WHERE name = :name")
+            ->execute([...$params, ':name' => $name]);
     }
 
-    /** Executes callback within a database lock */
-    private function withLock(string $name, callable $callback)
+    /**
+     * Atomically acquire a lease for a job.
+     *
+     * Uses a conditional UPDATE to ensure only one worker can acquire the lease.
+     * The WHERE clause checks that the lease is available (NULL or expired) before updating.
+     *
+     * @param string $name Job name
+     * @param int $leaseSeconds Lease duration in seconds
+     * @return bool True if lease was acquired, false if another worker got it
+     */
+    private function acquireLease(string $name, int $leaseSeconds): bool
+    {
+        $until = $this->clock->now()
+            ->modify("+{$leaseSeconds} seconds")
+            ->format(self::DB_DATETIME_FORMAT);
+
+        $stmt = $this->pdo()->prepare("
+            UPDATE jobs
+               SET lease_until = :until
+             WHERE name = :name
+               AND (lease_until IS NULL OR lease_until < NOW())
+        ");
+
+        $stmt->execute([':name' => $name, ':until' => $until]);
+
+        return $stmt->rowCount() === 1;
+    }
+
+    /** Executes callback within a database lock, returns null if lock not acquired */
+    private function withDatabaseLock(string $name, callable $callback): mixed
     {
         $pdo = $this->pdo();
         $stmt = $pdo->prepare('SELECT GET_LOCK(:name, 0)');
@@ -660,23 +691,13 @@ final class Job
         }
     }
 
-    // OUTPUT ================================================================
+    // RENDERING ==============================================================
 
-    /** Renders job status as a table */
-    private function render(array $rows, array $jobs, DateTimeImmutable $now)
+    private function renderJobTable(array $rows, DateTimeImmutable $now): void
     {
-        $nowTs = $now->getTimestamp();
+        $data = array_map(function (array $row) use ($now): array {
 
-        // Format relative time - cached timestamp for performance
-        $since = static fn(?string $t, int $nowTs) => !$t ? '-' : match (true) {
-            ($d = $nowTs - (new DateTimeImmutable($t))->getTimestamp()) < 60 => $d . 's',
-            $d < 3600 => intdiv($d, 60) . 'm',
-            $d < 86400 => intdiv($d, 3600) . 'h',
-            default => intdiv($d, 86400) . 'd',
-        };
-
-        $data = array_map(function (array $row) use ($jobs, $now, $nowTs, $since): array {
-            $job = $jobs[$row['name']] ?? null;
+            $job = $this->jobs[$row['name']] ?? null;
             $leaseActive = ($row['lease_until'] ?? null) && new DateTimeImmutable($row['lease_until']) > $now;
 
             return [
@@ -684,33 +705,53 @@ final class Job
                 'queue' => $job['queue'] ?? '-',
                 'priority' => $job['priority'] ?? '-',
                 'cron' => $job['cron'] ?? '-',
-                'last' => $since($row['last_run'] ?? null, $nowTs),
+                'last' => $this->formatRelativeTime($row['last_run'] ?? null, $now),
                 'lease' => $leaseActive ? 'active' : '-',
                 'fails' => $row['fail_count'] ?? 0,
-                'seen' => $since($row['seen_at'] ?? null, $nowTs),
+                'seen' => $this->formatRelativeTime($row['seen_at'] ?? null, $now),
                 'error' => $row['last_error'] ?? '-',
             ];
         }, $rows);
 
         Console::table([
-            'name' => 'Name', 'queue' => 'Queue', 'priority' => 'Priority', 'cron' => 'Cron',
-            'last' => 'Last Run', 'lease' => 'Leased', 'fails' => 'Fails', 'seen' => 'Seen', 'error' => 'Error',
+            'name' => 'Name',
+            'queue' => 'Queue',
+            'priority' => 'Priority',
+            'cron' => 'Cron',
+            'last' => 'Last Run',
+            'lease' => 'Leased',
+            'fails' => 'Fails',
+            'seen' => 'Seen',
+            'error' => 'Error',
         ], $data);
     }
 
-    // SLEEP & SIGNALS =======================================================
-
-    /** Sleeps until the next scheduled job or a default interval */
-    private function sleepUntilNext()
+    private function formatRelativeTime(?string $timestamp, DateTimeImmutable $now): string
     {
-        if (!$this->nextWake) {
+        if (!$timestamp) return '-';
+
+        $seconds = $now->getTimestamp() - (new DateTimeImmutable($timestamp))->getTimestamp();
+
+        return match (true) {
+            $seconds < 60 => "{$seconds}s",
+            $seconds < 3600 => intdiv($seconds, 60) . 'm',
+            $seconds < 86400 => intdiv($seconds, 3600) . 'h',
+            default => intdiv($seconds, 86400) . 'd',
+        };
+    }
+
+    // SLEEP & SIGNALS ========================================================
+
+    private function sleepUntilNext(): void
+    {
+        if (!$this->nextWakeTime) {
             $this->nap(1.0);
             return;
         }
 
-        $now = new DateTimeImmutable('now');
-        $seconds = $this->nextWake->getTimestamp() - $now->getTimestamp();
-        $micro = (int)$this->nextWake->format('u') - (int)$now->format('u');
+        $now = $this->clock->now();
+        $seconds = $this->nextWakeTime->getTimestamp() - $now->getTimestamp();
+        $micro = (int)$this->nextWakeTime->format('u') - (int)$now->format('u');
         $seconds += ($micro / 1_000_000) + (mt_rand(5, 20) / 1000);
 
         if ($seconds > 0) {
@@ -718,8 +759,7 @@ final class Job
         }
     }
 
-    /** Sleeps in small intervals while checking for stop signal */
-    private function nap(float $seconds)
+    private function nap(float $seconds): void
     {
         $remaining = $seconds;
 
@@ -731,24 +771,29 @@ final class Job
         }
     }
 
-    /** Sets up signal handlers for graceful shutdown */
-    private function trapSignals()
+    private function trapSignals(): callable
     {
-        if (!function_exists('pcntl_signal')) {
-            return static fn() => null;
-        }
+        if (!function_exists('pcntl_signal')) return static fn() => null;
 
-        $signals = array_filter([defined('SIGINT') ? SIGINT : null, defined('SIGTERM') ? SIGTERM : null]);
+        $signals = array_filter([
+            defined('SIGINT') ? SIGINT : null,
+            defined('SIGTERM') ? SIGTERM : null,
+        ]);
 
-        if ($signals === []) {
-            return static fn() => null;
-        }
+        if ($signals === []) return static fn() => null;
 
         $previous = [];
 
         foreach ($signals as $sig) {
-            $previous[$sig] = function_exists('pcntl_signal_get_handler') ? pcntl_signal_get_handler($sig) : SIG_DFL;
-            pcntl_signal($sig, fn() => (Console::info('Received ' . $this->signalName($sig) . ', shutting down worker...') || true) && $this->stop());
+
+            $previous[$sig] = function_exists('pcntl_signal_get_handler')
+                ? pcntl_signal_get_handler($sig)
+                : SIG_DFL;
+
+            pcntl_signal($sig, fn() => (
+                Console::info('Received ' . $this->signalName($sig) . ', shutting down worker...')
+                || true
+            ) && $this->stop());
         }
 
         return static function () use ($signals, $previous): void {
@@ -758,16 +803,12 @@ final class Job
         };
     }
 
-    /** Dispatches pending signals */
-    private function dispatchSignals()
+    private function dispatchSignals(): void
     {
-        if (function_exists('pcntl_signal_dispatch')) {
-            pcntl_signal_dispatch();
-        }
+        if (function_exists('pcntl_signal_dispatch')) pcntl_signal_dispatch();
     }
 
-    /** Returns a human-readable signal name */
-    private function signalName(int $signal)
+    private function signalName(int $signal): string
     {
         return match ($signal) {
             SIGINT => 'SIGINT',
@@ -776,30 +817,337 @@ final class Job
         };
     }
 
-    // HELPERS ===============================================================
+    // HELPERS ================================================================
 
-    /** Applies callback to the active job */
-    private function tap(callable $callback)
+    private function modifyJob(callable $callback): self
     {
-        if ($this->active !== null) {
-            $callback($this->jobs[$this->active]);
-        }
-
+        if ($this->activeJobName !== null) $callback($this->jobs[$this->activeJobName]);
         return $this;
     }
 
-    /** Generates a hash-based name for a job */
-    private function hash(string $cron, ?string $key)
+    /** Adds a hook to a specific lifecycle stage */
+    private function addHook(string $stage, callable $callback): self
     {
-        return substr(sha1($cron . '|' . ($key ?? '')), 0, 12);
+        return $this->modifyJob(fn(array &$job) => $job[$stage][] = $callback);
     }
 
-    /** Returns the earliest of two timestamps */
-    private function earliest(?DateTimeImmutable $left, ?DateTimeImmutable $right)
+    /** Executes an array of hooks/callbacks */
+    private function runHooks(array $hooks, mixed ...$args): void
     {
-        if ($left === null) return $right;
-        if ($right === null) return $left;
+        foreach ($hooks as $hook) $hook(...$args);
+    }
 
-        return $left <= $right ? $left : $right;
+    /** Records successful job execution */
+    private function recordJobSuccess(string $name, array $job): void
+    {
+        $this->updateJobState($name, [
+            'last_run' => $this->nowAsDbString(),
+            'lease_until' => null,
+            'last_error' => null,
+            'enqueued_at' => null,
+        ]);
+
+        Console::success("{$name}: {$job['cron']}");
+    }
+
+    /** Records failed job execution */
+    private function recordJobFailure(string $name, Throwable $e): void
+    {
+        $this->pdo()->prepare("
+            UPDATE jobs
+               SET last_run = :run, lease_until = NULL, last_error = :err, fail_count = fail_count + 1, enqueued_at = NULL
+             WHERE name = :name
+        ")->execute([
+            ':run' => $this->nowAsDbString(),
+            ':err' => $e->getMessage(),
+            ':name' => $name,
+        ]);
+
+        Console::error("{$name}: " . $e->getMessage());
+    }
+
+    private function nowAsDbString(): string
+    {
+        return $this->clock->now()->format(self::DB_DATETIME_FORMAT);
+    }
+
+    private function earliestTime(?DateTimeImmutable $left, ?DateTimeImmutable $right): ?DateTimeImmutable
+    {
+        return match (true) {
+            $left === null => $right,
+            $right === null => $left,
+            default => $left <= $right ? $left : $right,
+        };
+    }
+}
+
+// CLOCK - Time abstraction for testability ===================================
+
+/** Clock interface for time operations */
+interface ClockInterface
+{
+    public function now(): DateTimeImmutable;
+}
+
+/** System clock using real time (production) */
+final class SystemClock implements ClockInterface
+{
+    public function now(): DateTimeImmutable
+    {
+        return new DateTimeImmutable();
+    }
+}
+
+// CRON PARSER - Parses cron expressions into structured format ===============
+
+/** Parses and validates cron expressions (5 or 6 fields) */
+final readonly class CronParser
+{
+    /** Parses a cron expression into a structured array (always 6-field with seconds) */
+    public static function parse(string $expression): array
+    {
+        $tokens = preg_split('/\s+/', trim($expression));
+
+        if ($tokens === false || count($tokens) < 5 || count($tokens) > 6) {
+            throw new RuntimeException("Invalid cron expression: {$expression}");
+        }
+
+        // Convert 5-field to 6-field by prepending '0' for seconds
+        if (count($tokens) === 5) {
+            [$min, $hour, $dom, $mon, $dow] = $tokens;
+            $sec = '0';
+        } else {
+            [$sec, $min, $hour, $dom, $mon, $dow] = $tokens;
+        }
+
+        return [
+            'sec'  => self::expandField($sec, 0, 59, false),
+            'min'  => self::expandField($min, 0, 59, false),
+            'hour' => self::expandField($hour, 0, 23, false),
+            'dom'  => self::expandField($dom, 1, 31, false),
+            'mon'  => self::expandField($mon, 1, 12, false),
+            'dow'  => self::expandField($dow, 0, 6, true),
+            'domStar' => ($dom === '*'),
+            'dowStar' => ($dow === '*'),
+        ];
+    }
+
+    /** Expands a cron field (e.g., star-slash-5, 1-3, 1,2,3) into a map and list */
+    private static function expandField(string $field, int $min, int $max, bool $isDow): array
+    {
+        $field = trim($field);
+        $field = $field === '' ? '*' : $field;
+        $seen = [];
+        $clamp = fn(int $v) => $isDow && $v === 7 ? 0 : max($min, min($max, $v));
+
+        foreach (explode(',', $field) as $part) {
+            $part = trim($part);
+            if ($part === '') continue;
+
+            [$range, $step] = str_contains($part, '/') ? explode('/', $part, 2) : [$part, '1'];
+            $step = max(1, (int)$step);
+
+            if ($range === '*') {
+                for ($v = $min; $v <= $max; $v += $step) {
+                    $seen[$v] = true;
+                }
+            } elseif (str_contains($range, '-')) {
+                [$start, $end] = array_map('intval', explode('-', $range, 2));
+                [$start, $end] = [$clamp($start), $clamp($end)];
+                if ($start > $end) [$start, $end] = [$end, $start];
+                for ($v = $start; $v <= $end; $v += $step) {
+                    $seen[$v] = true;
+                }
+            } else {
+                $seen[$clamp((int)$range)] = true;
+            }
+        }
+
+        $values = $seen !== [] ? array_keys($seen) : range($min, $max);
+        sort($values, SORT_NUMERIC);
+
+        return ['map' => array_fill_keys($values, true), 'list' => $values];
+    }
+}
+
+// CRON EVALUATOR - Evaluates if cron expressions match timestamps ============
+
+/** Evaluates cron expressions and calculates next run times */
+final readonly class CronEvaluator
+{
+    /** Determines if a job is due and calculates next run time */
+    public static function evaluate(array $parsed, DateTimeImmutable $now, ?DateTimeImmutable $lastRun): array
+    {
+        $matches = self::matches($parsed, $now);
+        $due = false;
+
+        if ($matches) {
+            // Always compare with second precision (6-field cron)
+            $due = !$lastRun || $lastRun->format('Y-m-d H:i:s') !== $now->format('Y-m-d H:i:s');
+        }
+
+        return ['next' => self::nextMatch($parsed, $now), 'due' => $due];
+    }
+
+    /** Checks if a moment matches a cron expression */
+    public static function matches(array $parsed, DateTimeImmutable $moment): bool
+    {
+        $second = (int)$moment->format('s');
+        $minute = (int)$moment->format('i');
+        $hour = (int)$moment->format('G');
+        $dom = (int)$moment->format('j');
+        $mon = (int)$moment->format('n');
+        $dow = (int)$moment->format('w');
+
+        if (!isset($parsed['sec']['map'][$second], $parsed['min']['map'][$minute], $parsed['hour']['map'][$hour], $parsed['mon']['map'][$mon])) {
+            return false;
+        }
+
+        $domMatch = isset($parsed['dom']['map'][$dom]);
+        $dowMatch = isset($parsed['dow']['map'][$dow]);
+
+        return match (true) {
+            $parsed['domStar'] && $parsed['dowStar'] => true,
+            $parsed['domStar'] => $dowMatch,
+            $parsed['dowStar'] => $domMatch,
+            default => $domMatch || $dowMatch,
+        };
+    }
+
+    /** Calculates the next time a cron expression will match using incremental algorithm */
+    public static function nextMatch(array $parsed, DateTimeImmutable $from): DateTimeImmutable
+    {
+        $current = $from->modify('+1 second');
+        $maxYear = (int)$current->format('Y') + 5;
+
+        $dayMatches = fn(int $d, DateTimeImmutable $date) => match (true) {
+            $parsed['domStar'] && $parsed['dowStar'] => true,
+            $parsed['domStar'] => isset($parsed['dow']['map'][(int)$date->format('w')]),
+            $parsed['dowStar'] => isset($parsed['dom']['map'][$d]),
+            default => isset($parsed['dom']['map'][$d]) || isset($parsed['dow']['map'][(int)$date->format('w')]),
+        };
+
+        $resetTime = fn(DateTimeImmutable $dt) => $dt->setTime(
+            $parsed['hour']['list'][0],
+            $parsed['min']['list'][0],
+            $parsed['sec']['list'][0]
+        );
+
+        for ($attempts = 0; $attempts < 10000; $attempts++) {
+            [$year, $month, $day, $hour, $minute, $second] = [
+                (int)$current->format('Y'),
+                (int)$current->format('n'),
+                (int)$current->format('j'),
+                (int)$current->format('G'),
+                (int)$current->format('i'),
+                (int)$current->format('s'),
+            ];
+
+            if ($year > $maxYear) {
+                throw new RuntimeException('Unable to compute next cron match within 5 years.');
+            }
+
+            // Check month
+            if (!isset($parsed['mon']['map'][$month])) {
+                $next = self::nextIn($parsed['mon']['list'], $month);
+                $current = $resetTime($next
+                    ? $current->setDate($year, $next, 1)
+                    : $current->setDate($year + 1, $parsed['mon']['list'][0], 1));
+                continue;
+            }
+
+            // Check day (considering both DOM and DOW)
+            if (!$dayMatches($day, $current)) {
+                $found = false;
+                $daysInMonth = (int)$current->format('t');
+
+                for ($d = $day + 1; $d <= $daysInMonth; $d++) {
+                    $testDate = $current->setDate($year, $month, $d);
+                    if ($dayMatches($d, $testDate)) {
+                        $current = $resetTime($testDate);
+                        $found = true;
+                        break;
+                    }
+                }
+
+                if (!$found) {
+                    $next = self::nextIn($parsed['mon']['list'], $month + 1);
+                    $current = $resetTime($next
+                        ? $current->setDate($year, $next, 1)
+                        : $current->setDate($year + 1, $parsed['mon']['list'][0], 1));
+                }
+
+                continue;
+            }
+
+            // Check hour
+            if (!isset($parsed['hour']['map'][$hour])) {
+                $next = self::nextIn($parsed['hour']['list'], $hour);
+                $current = $next
+                    ? $current->setTime($next, $parsed['min']['list'][0], $parsed['sec']['list'][0])
+                    : $current->modify('+1 day')->setTime(
+                        $parsed['hour']['list'][0],
+                        $parsed['min']['list'][0],
+                        $parsed['sec']['list'][0]
+                    );
+                continue;
+            }
+
+            // Check minute
+            if (!isset($parsed['min']['map'][$minute])) {
+                $next = self::nextIn($parsed['min']['list'], $minute);
+                if ($next) {
+                    $current = $current->setTime($hour, $next, $parsed['sec']['list'][0]);
+                } else {
+                    $current = $current->modify('+1 hour');
+                    $current = $current->setTime(
+                        (int)$current->format('G'),
+                        $parsed['min']['list'][0],
+                        $parsed['sec']['list'][0]
+                    );
+                }
+                continue;
+            }
+
+            // Check second
+            if (!isset($parsed['sec']['map'][$second])) {
+                $next = self::nextIn($parsed['sec']['list'], $second);
+                if ($next) {
+                    $current = $current->setTime($hour, $minute, $next);
+                } else {
+                    $current = $current->modify('+1 minute');
+                    $current = $current->setTime(
+                        (int)$current->format('G'),
+                        (int)$current->format('i'),
+                        $parsed['sec']['list'][0]
+                    );
+                }
+                continue;
+            }
+
+            return $current;
+        }
+
+        throw new RuntimeException('Next cron match calculation exceeded maximum iterations.');
+    }
+
+    /** Binary search for next valid value in sorted list - O(log n) */
+    private static function nextIn(array $list, int $val): ?int
+    {
+        $left = 0;
+        $right = count($list) - 1;
+
+        while ($left <= $right) {
+
+            $mid = ($left + $right) >> 1;
+
+            if ($list[$mid] < $val) {
+                $left = $mid + 1;
+            } else {
+                $right = $mid - 1;
+            }
+        }
+
+        return $list[$left] ?? null;
     }
 }

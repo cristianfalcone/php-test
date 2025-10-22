@@ -15,21 +15,28 @@ Console::use(fn() => Container::set('db', Database::get()));
 
 Job::register(Console::instance());
 
-Job::schedule('* * * * *', function () {
+Job::schedule('emails.send', function () {
     Console::info('Sending pending emails...');
 })
-    ->name('emails.send')
+    ->everyFiveMinutes()
     ->queue('emails')
     ->concurrency(3)
     ->priority(10);
 
-Job::schedule('0 2 * * *', function () {
+Job::schedule('report.daily', function () {
     Console::info('Daily report...');
-    // ...
 })
-    ->name('report.daily')
+    ->daily()
+    ->hour(2)  // 2am
+    ->month([1, 4, 7, 10])  // Run only in Jan, Apr, Jul, Oct
     ->queue('reports')
     ->priority(50);
+
+Job::schedule('monitor.health', function () {
+    Console::info('Health check...');
+})
+    ->everyTenSeconds()  // Sub-minute scheduling
+    ->when(fn() => getenv('ENABLE_MONITORING') === 'true');
 
 Test::register(Console::instance());
 

@@ -430,12 +430,12 @@ final class Test
         if ($normalized) {
             Console::red()->log('    ' . $normalized['message']);
             Console::dim()->log(sprintf('    at %s:%d', $normalized['file'], $normalized['line']));
-            array_walk(array_slice($normalized['trace'], 0, 6), fn($f) => Console::dim()->log(sprintf(
+            array_map(fn($f) => Console::dim()->log(sprintf(
                 '      %s:%d %s()',
                 $f['file'],
                 $f['line'],
                 $f['function']
-            )));
+            )), array_slice($normalized['trace'], 0, 6));
         }
 
         $this->summary[$counter]++;
