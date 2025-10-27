@@ -222,6 +222,23 @@ Code should be:
 - **Clever** - Use PHP 8.4 features intelligently (property hooks, asymmetric visibility, readonly classes, enums, match, first-class callables)
 - **Performant** - Fast without sacrificing readability
 
+### Pre-Market Development Mindset
+
+**CRITICAL**: This project is **pre-release**. There are **no backward compatibility constraints**. The goal is to ship with the **best possible shape**.
+
+When adding features or refactoring:
+
+1. **No backward compatibility concerns** - Break anything if it improves the design
+2. **Holistic coherence** - View each class as a unified whole, not a collection of features
+3. **Framework-wide consistency** - Ensure:
+   - Classes use the latest features when interacting with each other
+   - Consistent code style, naming conventions, and patterns across all components
+   - Documentation stays synchronized with implementation
+4. **Always update tests** - Keep test suites comprehensive and up-to-date
+5. **Micro, clever, elegant** - Prefer ingenious simplicity over verbose clarity
+
+**Example**: When Console2 added `__call`/`__callStatic`, we didn't preserve the old methods - we eliminated them entirely, reduced 239 lines to 112, and achieved better DX through @method tags.
+
 ### Type Inference
 
 Trust PHP's type inference. Remove redundant return types:
@@ -248,6 +265,49 @@ Keep types when:
 - **Guard clauses** to reduce nesting
 - **Null coalescing** (`??`) and elvis (`?:`)
 
+### The Simplest Solution Wins
+
+**CRITICAL**: Always seek the simplest, most direct solution first. Don't over-engineer.
+
+Ask yourself:
+1. **"Is there a built-in that does this?"** - Use `getcwd()`, `realpath()`, `dirname()`, etc.
+2. **"Can I assume standard conventions?"** - Tests run from project root, paths are absolute, etc.
+3. **"Am I inferring what I can just know?"** - Don't calculate what you can directly query
+
+**Example: Finding project root**
+
+```php
+// ❌ AVOID - Over-engineered (23 lines)
+private function commonBasePath() {
+    $paths = array_map(fn($p) => realpath(...), $this->sourcePaths);
+    $parts = array_map(fn($p) => explode('/', ...), $paths);
+    // ... complex logic to find common prefix
+    // ... handle edge cases
+    // ... return parent directory
+}
+
+// ✅ PREFER - Simple and direct (1 line)
+private function commonBasePath() {
+    return getcwd() . '/';  // Tests always run from project root
+}
+```
+
+**Why this works:**
+- Tests run from project root (universal convention)
+- No need to infer - just use what we know
+- Matches behavior of PHPUnit, pytest, Jest
+
+**Red flags you're over-complicating:**
+- Complex loops and array operations for simple tasks
+- Inferring information you could directly obtain
+- Handling edge cases that violate standard conventions
+- More than 5-10 lines for a single responsibility
+
+**When complexity is justified:**
+- Parsing complex formats (cron expressions, XML)
+- Performance-critical code (job scheduling, parallel execution)
+- Edge cases that actually occur in practice
+
 Example:
 ```php
 // Avoid creating private methods for single use
@@ -273,6 +333,50 @@ When optimization is necessary:
 - Shared memory over files for IPC
 - Atomic operations with semaphores instead of manual locks
 - Profile before optimizing
+
+## Debugging with Xdebug
+
+**IMPORTANT**: This project has **Xdebug 3.4.6** installed and configured in the `app` container.
+
+### When Tests Fail or Bugs Are Hard to Trace
+
+Use the **xdebug-inspect skill** to generate instrumented debugging scripts that reveal:
+- Variable states at specific execution points
+- Memory usage and leaks
+- Call stacks and execution flow
+- Timing and performance bottlenecks
+
+### Usage
+
+```bash
+# Invoke the skill when you need deep inspection
+/skill xdebug-inspect
+
+# The skill will generate a debug script like:
+# debug_<issue>.php
+
+# Run it in the container
+podman compose exec app php debug_<issue>.php
+```
+
+### Xdebug Capabilities Available
+
+- `xdebug_var_dump($var)` - Enhanced variable dump with structure
+- `xdebug_get_function_stack()` - Complete call stack with files/lines
+- `xdebug_time_index()` - Precise timing since script start
+- `xdebug_memory_usage()` - Current memory usage
+- `xdebug_peak_memory_usage()` - Peak memory consumption
+
+### When to Use
+
+- Tests failing with unclear reasons
+- Investigating complex bugs or race conditions
+- Analyzing memory or performance issues
+- Understanding execution flow through complex code
+- Debugging closures and their captured variables
+- Tracking state mutations across multiple calls
+
+See [.claude/skills/xdebug-inspect/SKILL.md](.claude/skills/xdebug-inspect/SKILL.md) for complete documentation and examples.
 
 ## Key Files
 

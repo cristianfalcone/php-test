@@ -199,9 +199,9 @@ Test::describe('Console', function () {
 
         [, $stdout] = dispatch($cli, 'color');
 
-        Test::assertStringContainsString('[OK] coloreado', $stdout);
+        Test::assertStringContainsString('[ok] coloreado', $stdout);
         if (str_contains($stdout, "\033[")) {
-            Test::assertStringContainsString("\033[32m[OK] coloreado\033[39m", $stdout);
+            Test::assertStringContainsString("\033[32m[ok] coloreado\033[39m", $stdout);
         }
     });
 
@@ -215,7 +215,7 @@ Test::describe('Console', function () {
 
         [,, $stderr] = dispatch($cli, 'fail');
 
-        Test::assertStringContainsString('[ERROR] fallo', $stderr);
+        Test::assertStringContainsString('[error] fallo', $stderr);
     });
 
     Test::it('should emit string when command returns string', function () {
@@ -281,7 +281,8 @@ Test::describe('Console', function () {
 
         [, $stdout, $stderr] = dispatch($cli, 'empty-line');
 
-        Test::assertSame(PHP_EOL, $stdout);
+        // When not TTY, timestamp is added even to empty messages
+        Test::assertTrue(str_ends_with($stdout, PHP_EOL));
         Test::assertSame('', $stderr);
     });
 
@@ -309,7 +310,7 @@ Test::describe('Console', function () {
 
         [, $stdout, $stderr] = dispatch($cli, 'styled-info');
 
-        Test::assertStringContainsString('[INFO] informativo', $stdout);
+        Test::assertStringContainsString('[info] informativo', $stdout);
         Test::assertSame('', $stderr);
     });
 
@@ -403,7 +404,9 @@ Test::describe('Console', function () {
         [$exitCode] = dispatch($cli, 'noop');
 
         Test::assertSame(0, $exitCode);
-        Test::assertSame("pre-init\n", $out);
+        // When not TTY (file stream in tests), includes timestamp
+        Test::assertStringContainsString('pre-init', $out);
+        Test::assertTrue(str_ends_with($out, "\n"));
     });
 
     Test::it('should close owned streams on cleanup', function () {
@@ -445,5 +448,236 @@ Test::describe('Console', function () {
         Test::assertSame(0, $exitCode);
         Test::assertFalse(is_resource($stdout));
         Test::assertFalse(is_resource($stderr));
+    });
+
+    Test::it('should add timestamps when not in TTY mode', function () {
+        Harness::$isatty = false;
+        $cli = Console::create();
+
+        $cli->command('log-test', function () {
+            Console::log('test message');
+            Console::info('info message');
+            return 0;
+        })->describe('Log test');
+
+        [, $stdout] = dispatch($cli, 'log-test');
+
+        // Should have timestamp format YYYY-MM-DD HH:MM:SS.mmm
+        Test::assertTrue(preg_match('/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} test message/', $stdout) === 1);
+        Test::assertTrue(preg_match('/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[info\] info message/', $stdout) === 1);
+    });
+
+    Test::it('should not use colors when not in TTY mode', function () {
+        Harness::$isatty = false;
+        $cli = Console::create();
+
+        $cli->command('color-test', function () {
+            Console::success('success message');
+            Console::error('error message');
+            return 0;
+        })->describe('Color test');
+
+        [, $stdout, $stderr] = dispatch($cli, 'color-test');
+
+        // Should NOT have ANSI color codes
+        Test::assertFalse(str_contains($stdout, "\033["));
+        Test::assertFalse(str_contains($stderr, "\033["));
+        Test::assertStringContainsString('[ok] success message', $stdout);
+        Test::assertStringContainsString('[error] error message', $stderr);
+    });
+
+    Test::it('should allow manual override of timestamps', function () {
+        Harness::$isatty = true; // TTY detected (normally no timestamps)
+        $cli = Console::create();
+
+        $cli->command('override-test', function () use ($cli) {
+            // Manually enable timestamps
+            $cli->withTimestamps(true);
+            Console::log('forced timestamp');
+            return 0;
+        })->describe('Override test');
+
+        [, $stdout] = dispatch($cli, 'override-test');
+
+        // Should have timestamp even though TTY is true
+        Test::assertTrue(preg_match('/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} forced timestamp/', $stdout) === 1);
+    });
+
+    Test::it('should allow manual override of colors', function () {
+        Harness::$isatty = true; // TTY detected, colors enabled
+        $cli = Console::create();
+
+        $cli->command('color-override', function () use ($cli) {
+            // Manually disable colors
+            $cli->withColors(false);
+            Console::success('no color');
+            return 0;
+        })->describe('Color override test');
+
+        [, $stdout] = dispatch($cli, 'color-override');
+
+        // Should NOT have ANSI color codes even though TTY is true
+        Test::assertFalse(str_contains($stdout, "\033["));
+        Test::assertStringContainsString('[ok] no color', $stdout);
+    });
+
+    Test::it('should parse boolean flags with short and long aliases', function () {
+        $cli = Console::create();
+
+        $cli->command('test', function () use ($cli) {
+            $opts = $cli->options();
+            Console::log('verbose=' . ($opts['verbose'] ?? 'unset'));
+            Console::log('quiet=' . ($opts['quiet'] ?? 'unset'));
+            return 0;
+        })
+        ->option('-v, --verbose', 'Enable verbose mode')
+        ->option('-q, --quiet', 'Enable quiet mode');
+
+        [, $stdout] = dispatch($cli, 'test', ['-v']);
+        Test::assertStringContainsString('verbose=1', $stdout);
+
+        [, $stdout] = dispatch($cli, 'test', ['--verbose']);
+        Test::assertStringContainsString('verbose=1', $stdout);
+
+        [, $stdout] = dispatch($cli, 'test', ['-q']);
+        Test::assertStringContainsString('quiet=1', $stdout);
+    });
+
+    Test::it('should parse flags with values', function () {
+        $cli = Console::create();
+
+        $cli->command('build', function () use ($cli) {
+            $opts = $cli->options();
+            Console::log('output=' . ($opts['output'] ?? 'unset'));
+            return 0;
+        })
+        ->option('-o, --output', 'Output file', 'bundle.js');
+
+        [, $stdout] = dispatch($cli, 'build', ['--output=custom.js']);
+        Test::assertStringContainsString('output=custom.js', $stdout);
+
+        [, $stdout] = dispatch($cli, 'build', ['--output', 'another.js']);
+        Test::assertStringContainsString('output=another.js', $stdout);
+
+        [, $stdout] = dispatch($cli, 'build', ['-o', 'short.js']);
+        Test::assertStringContainsString('output=short.js', $stdout);
+    });
+
+    Test::it('should apply default values for unset options', function () {
+        $cli = Console::create();
+
+        $cli->command('serve', function () use ($cli) {
+            $opts = $cli->options();
+            Console::log('port=' . $opts['port']);
+            Console::log('host=' . $opts['host']);
+            return 0;
+        })
+        ->option('--port', 'Port number', 3000)
+        ->option('--host', 'Host name', 'localhost');
+
+        [, $stdout] = dispatch($cli, 'serve', []);
+        Test::assertStringContainsString('port=3000', $stdout);
+        Test::assertStringContainsString('host=localhost', $stdout);
+    });
+
+    Test::it('should handle negated flags with --no- prefix', function () {
+        $cli = Console::create();
+
+        $cli->command('compile', function () use ($cli) {
+            $opts = $cli->options();
+            Console::log('color=' . (($opts['color'] ?? true) ? 'true' : 'false'));
+            return 0;
+        });
+
+        [, $stdout] = dispatch($cli, 'compile', ['--no-color']);
+        Test::assertStringContainsString('color=false', $stdout);
+
+        [, $stdout] = dispatch($cli, 'compile', []);
+        Test::assertStringContainsString('color=true', $stdout);
+    });
+
+    Test::it('should collect positional arguments in underscore property', function () {
+        $cli = Console::create();
+
+        $cli->command('copy', function () use ($cli) {
+            $opts = $cli->options();
+            Console::log('args=' . implode(',', $opts['_']));
+            return 0;
+        });
+
+        [, $stdout] = dispatch($cli, 'copy', ['src', 'dest']);
+        Test::assertStringContainsString('args=src,dest', $stdout);
+    });
+
+    Test::it('should stop parsing flags after double dash', function () {
+        $cli = Console::create();
+
+        $cli->command('run', function () use ($cli) {
+            $opts = $cli->options();
+            Console::log('verbose=' . ($opts['verbose'] ?? 'unset'));
+            Console::log('args=' . implode(',', $opts['_']));
+            return 0;
+        })
+        ->option('-v, --verbose', 'Verbose');
+
+        [, $stdout] = dispatch($cli, 'run', ['-v', '--', '--arg']);
+        Test::assertStringContainsString('verbose=1', $stdout);
+        Test::assertStringContainsString('args=--arg', $stdout);
+    });
+
+    Test::it('should accumulate repeated flags into arrays', function () {
+        $cli = Console::create();
+
+        $cli->command('lint', function () use ($cli) {
+            $opts = $cli->options();
+            $ignore = $opts['ignore'] ?? [];
+            Console::log('ignore=' . (is_array($ignore) ? implode(',', $ignore) : $ignore));
+            return 0;
+        })
+        ->option('--ignore', 'Files to ignore');
+
+        [, $stdout] = dispatch($cli, 'lint', ['--ignore=node_modules', '--ignore=dist']);
+        Test::assertStringContainsString('ignore=node_modules,dist', $stdout);
+    });
+
+    Test::it('should show registered options in help command', function () {
+        $cli = Console::create();
+
+        $cli->command('deploy', function () {
+            return 0;
+        })
+        ->describe('Deploy the application')
+        ->option('-e, --env', 'Environment', 'production')
+        ->option('-v, --verbose', 'Verbose output')
+        ->option('--dry-run', 'Dry run mode');
+
+        [, $stdout] = dispatch($cli, 'help', ['deploy']);
+
+        Test::assertStringContainsString('Options:', $stdout);
+        Test::assertStringContainsString('-e, --env', $stdout);
+        Test::assertStringContainsString('Environment', $stdout);
+        Test::assertStringContainsString('(default: production)', $stdout);
+        Test::assertStringContainsString('-v, --verbose', $stdout);
+        Test::assertStringContainsString('--dry-run', $stdout);
+    });
+
+    Test::it('should show usage examples in help command', function () {
+        $cli = Console::create();
+
+        $cli->command('build', function () {
+            return 0;
+        })
+        ->describe('Build the project')
+        ->option('-e, --env', 'Environment')
+        ->example('src/ dist/', 'Build from src to dist')
+        ->example('-e production', 'Build for production');
+
+        [, $stdout] = dispatch($cli, 'help', ['build']);
+
+        Test::assertStringContainsString('Examples:', $stdout);
+        Test::assertStringContainsString('console build src/ dist/', $stdout);
+        Test::assertStringContainsString('Build from src to dist', $stdout);
+        Test::assertStringContainsString('console build -e production', $stdout);
+        Test::assertStringContainsString('Build for production', $stdout);
     });
 });

@@ -1,2 +1,11 @@
 .env
 .claude
+.vscode
+
+# Temporary debug scripts (use xdebug-inspect skill)
+debug_*.php
+
+# Reports
+coverage/
+clover.xml
+junit.xml

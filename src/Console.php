@@ -19,6 +19,8 @@ use Ajo\Core\Console as Root;
  * @method static int dispatch(?string $command = null, array $arguments = [], $stdout = null, $stderr = null)
  * @method static array<int, string> arguments()
  * @method static string bin()
+ * @method static Root withColors(bool $enable = true)
+ * @method static Root withTimestamps(bool $enable = true)
  * @method static void blank(int $lines = 1)
  * @method static void log(string $message = '')
  * @method static void success(string $message)

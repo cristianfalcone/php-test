@@ -493,7 +493,7 @@ Test::describe('Job Stress Testing', function () {
 
         $row2 = row($state, 'retry-job');
         Test::assertNull($row2['last_error'], 'Error should be cleared on success');
-        Test::assertSame(1, (int)$row2['fail_count'], 'Fail count persists');
+        Test::assertSame(0, (int)$row2['fail_count'], 'Fail count should reset on success');
     });
 
     Test::it('should execute dispatched jobs immediately regardless of cron', function ($state) {

@@ -40,4 +40,24 @@ Job::schedule('monitor.health', function () {
 
 Test::register(Console::instance());
 
+// Example command with options
+Console::command('demo', function () {
+    $opts = Console::options();
+
+    Console::log('Positional args: ' . implode(', ', $opts['_']));
+    Console::log('Verbose: ' . ($opts['verbose'] ?? 'false'));
+    Console::log('Output: ' . ($opts['output'] ?? 'default'));
+    Console::log('Environment: ' . $opts['env']);
+
+    return 0;
+})
+->describe('Demo command with options')
+->usage('<file> [<file>...] [options]')
+->option('-v, --verbose', 'Enable verbose output')
+->option('-o, --output', 'Output file')
+->option('-e, --env', 'Environment', 'development')
+->example('file1.txt file2.txt -v', 'Process files with verbose output')
+->example('-e production --output=dist/bundle.js', 'Build for production')
+->example('src/ --no-color', 'Process directory without colors');
+
 exit(Console::dispatch());

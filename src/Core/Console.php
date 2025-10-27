@@ -32,6 +32,9 @@ final class Console extends Router
     /** @var array<int, string> */
     private array $arguments = [];
 
+    /** @var array<string, mixed> */
+    private array $options = [];
+
     /** @var resource|null */
     private $stdout = null;
     private bool $ownsStdout = false;
@@ -40,7 +43,9 @@ final class Console extends Router
     private $stderr = null;
     private bool $ownsStderr = false;
 
-    private bool $supportsColors = false;
+    private bool $isInteractive = false;
+    private bool $withColors = false;
+    private bool $withTimestamps = false;
 
     /** @var array<string, array{0:string,1:string}> */
     private const STYLES = [
@@ -78,7 +83,8 @@ final class Console extends Router
 
         $this->command('help', function () {
 
-            $target = $this->arguments()[0] ?? null;
+            $opts = $this->options();
+            $target = $opts['_'][0] ?? null;
 
             if ($target === null) {
 
@@ -94,7 +100,8 @@ final class Console extends Router
                 sort($names, SORT_STRING);
                 $width = max(array_map('strlen', $names));
 
-                $this->log('Available commands:'); $this->blank();
+                $this->log('Available commands:');
+                $this->blank();
 
                 foreach ($names as $name) {
 
@@ -104,15 +111,16 @@ final class Console extends Router
                     $this->log($description === '' ? $name : $name . str_repeat(' ', $padding) . $description);
                 }
 
-                $this->blank(); $this->log(sprintf("Use '%s help <command>' for more details.", $this->bin()));
+                $this->blank();
+                $this->log(sprintf("Use '%s help <command>' for more details.", $this->bin()));
 
                 return 0;
             }
 
             $command = $this->normalize($target);
-            $description = $this->commands[$command]['description'] ?? null;
+            $definition = $this->commands[$command] ?? null;
 
-            if ($description === null) {
+            if ($definition === null) {
 
                 $this->error(sprintf("Command '%s' does not exist.", $command));
                 $this->log(sprintf("Use '%s help' to see the list of commands.", $this->bin()));
@@ -122,6 +130,11 @@ final class Console extends Router
 
             $this->log(sprintf('Command: %s', $command));
 
+            $description = $definition['description'] ?? '';
+            $options = $definition['options'] ?? [];
+            $examples = $definition['examples'] ?? [];
+            $usageLines = $definition['usage'] ?? [];
+
             if ($description !== '') {
                 $this->blank();
                 $this->log('Description:');
@@ -130,10 +143,55 @@ final class Console extends Router
 
             $this->blank();
             $this->log('Usage:');
-            $this->log(sprintf('  %s %s', $this->bin(), $command));
+
+            if ($usageLines !== []) {
+                foreach ($usageLines as $line) {
+                    $this->log(sprintf('  %s %s %s', $this->bin(), $command, $line));
+                }
+            } else {
+                $this->log(sprintf('  %s %s [options]', $this->bin(), $command));
+            }
+
+            if ($options !== []) {
+                $this->blank();
+                $this->log('Options:');
+
+                foreach ($options as $opt) {
+                    $flags = $opt['short'] !== null
+                        ? sprintf('-%s, --%s', $opt['short'], $opt['long'])
+                        : sprintf('    --%s', $opt['long']);
+
+                    $desc = $opt['description'] ?? '';
+                    $default = $opt['default'] ?? null;
+
+                    $line = '  ' . $flags;
+
+                    if ($desc !== '') {
+                        $line .= '  ' . $desc;
+                    }
+
+                    if ($default !== null) {
+                        $line .= sprintf(' (default: %s)', is_bool($default) ? ($default ? 'true' : 'false') : $default);
+                    }
+
+                    $this->log($line);
+                }
+            }
+
+            if ($examples !== []) {
+                $this->blank();
+                $this->log('Examples:');
+
+                foreach ($examples as $example) {
+                    $this->log(sprintf('  %s %s %s', $this->bin(), $command, $example['usage']));
+
+                    if ($example['description'] !== null) {
+                        $this->log('    ' . $example['description']);
+                    }
+                }
+            }
 
             return 0;
-
         })->describe('Shows help for available commands.');
     }
 
@@ -145,6 +203,9 @@ final class Console extends Router
         $this->commands[$command] = [
             'description' => '',
             'handler' => $this->adapt($handler),
+            'options' => [],
+            'examples' => [],
+            'usage' => [],
         ];
 
         $this->active = $command;
@@ -156,8 +217,47 @@ final class Console extends Router
     public function describe(string $description)
     {
         if ($this->active === null) throw new LogicException('No active command. Call command() before describe().');
-
         $this->commands[$this->active]['description'] = trim($description);
+        return $this;
+    }
+
+    /** Adds custom usage line for the active command. */
+    public function usage(string $usage)
+    {
+        if ($this->active === null) throw new LogicException('No active command. Call command() before usage().');
+        $this->commands[$this->active]['usage'][] = $usage;
+        return $this;
+    }
+
+    /** Adds a usage example for the active command. */
+    public function example(string $usage, ?string $description = null)
+    {
+        if ($this->active === null) throw new LogicException('No active command. Call command() before example().');
+        $this->commands[$this->active]['examples'][] = ['usage' => $usage, 'description' => $description];
+        return $this;
+    }
+
+    /** Registers an option for the active command. */
+    public function option(string $flags, string $description = '', $default = null)
+    {
+        if ($this->active === null) throw new LogicException('No active command. Call command() before option().');
+
+        // Parse flags: "-v, --verbose" or "--verbose, -v" or just "--verbose"
+        $parts = array_values(array_filter(array_map('trim', explode(',', $flags))));
+        $short = null;
+        $long = null;
+
+        foreach ($parts as $part) {
+            match (true) {
+                str_starts_with($part, '--') => $long = substr($part, 2),
+                str_starts_with($part, '-') => $short = substr($part, 1),
+                default => null,
+            };
+        }
+
+        if ($long === null) throw new InvalidArgumentException('Option must have a long flag (--name).');
+
+        $this->commands[$this->active]['options'][$long] = compact('short', 'long', 'description', 'default');
 
         return $this;
     }
@@ -188,6 +288,11 @@ final class Console extends Router
 
         try {
             $handler = $this->commands[$this->command]['handler'] ?? null;
+            $config = $this->commands[$this->command]['options'] ?? [];
+
+            // Parse arguments with command options
+            $this->options = $this->parse($this->arguments, $config);
+
             $stack = [...$this->stack($this->command), $handler === null ? $this->notFoundHandler : $handler];
             $response = $this->run($stack);
         } catch (Throwable $throwable) {
@@ -212,17 +317,98 @@ final class Console extends Router
 
         $this->closeStream($this->stdout, $this->ownsStdout);
         $this->closeStream($this->stderr, $this->ownsStderr);
-        $this->supportsColors = false;
+        $this->isInteractive = false;
+        $this->withColors = false;
+        $this->withTimestamps = false;
         $this->command = '';
         $this->arguments = [];
+        $this->options = [];
 
         return $code;
     }
 
-    /** Returns the command arguments. */
+    /** Returns the raw command arguments. */
     public function arguments()
     {
         return $this->arguments;
+    }
+
+    /** Returns parsed options with flags and positional args in '_'. */
+    public function options()
+    {
+        return $this->options;
+    }
+
+    /**
+     * Parses argv into options structure.
+     *
+     * @param array<int, string> $argv Raw arguments
+     * @param array<string, array{short: ?string, long: string, default: mixed, description: string}> $config Command options
+     * @return array{_: array<int, string>, ...} Parsed options with positional args in '_'
+     */
+    private function parse(array $argv, array $config)
+    {
+        $result = ['_' => []];
+        $aliases = [];
+        $defaults = [];
+
+        // Build alias map and defaults from registered options
+        foreach ($config as $long => $opt) {
+            if ($opt['short'] !== null) $aliases[$opt['short']] = $long;
+            if ($opt['default'] !== null) $defaults[$long] = $opt['default'];
+        }
+
+        $stopFlags = false;
+
+        for ($i = 0; $i < count($argv); $i++) {
+            $arg = $argv[$i];
+
+            // After --, everything is positional
+            if ($arg === '--') {
+                $stopFlags = true;
+                continue;
+            }
+
+            // Positional argument
+            if ($stopFlags || !str_starts_with($arg, '-')) {
+                $result['_'][] = $arg;
+                continue;
+            }
+
+            // Parse flag
+            $isLong = str_starts_with($arg, '--');
+            $raw = $isLong ? substr($arg, 2) : substr($arg, 1);
+            $value = true;
+
+            // Handle --flag=value
+            if ($isLong && str_contains($raw, '=')) {
+                [$raw, $value] = explode('=', $raw, 2);
+            }
+
+            // Resolve alias to long flag name
+            $key = $aliases[$raw] ?? $raw;
+
+            // Handle --no-* negation
+            if ($isLong && str_starts_with($key, 'no-')) {
+                $key = substr($key, 3);
+                $value = false;
+            } elseif ($value === true && $i + 1 < count($argv) && !str_starts_with($argv[$i + 1], '-')) {
+                // Next arg is the value
+                $value = $argv[++$i];
+            }
+
+            // Accumulate repeated flags into arrays
+            $result[$key] = isset($result[$key])
+                ? (is_array($result[$key]) ? [...$result[$key], $value] : [$result[$key], $value])
+                : $value;
+        }
+
+        // Apply defaults for unset options
+        foreach ($defaults as $key => $default) {
+            $result[$key] ??= $default;
+        }
+
+        return $result;
     }
 
     /** Returns the binary name. */
@@ -231,17 +417,30 @@ final class Console extends Router
         return $this->bin;
     }
 
+    /** Habilita/deshabilita colores ANSI */
+    public function withColors(bool $enable = true): static
+    {
+        $this->withColors = $enable;
+        return $this;
+    }
+
+    /** Habilita/deshabilita timestamps en logs */
+    public function withTimestamps(bool $enable = true): static
+    {
+        $this->withTimestamps = $enable;
+        return $this;
+    }
+
     /** Generates a blank line. */
     public function blank(int $lines = 1)
     {
-        if ($lines <= 0) return;
         for ($index = 0; $index < $lines; $index++) $this->log();
     }
 
     /** Logs a message to standard output. */
     public function log(string $message = '')
     {
-        $this->write($message);
+        $this->write($this->timestamp() . $message);
     }
 
     /**
@@ -278,7 +477,6 @@ final class Console extends Router
         // Calculate column widths (strip ANSI codes for accurate width)
         $stripAnsi = fn($s) => preg_replace('/\e\[[0-9;]*m/', '', $s);
         $widths = array_map(fn($h) => strlen($stripAnsi($h)), $headers);
-
         foreach ($rows as $row) {
             foreach ($keys as $i => $key) {
                 $value = (string)($row[$key] ?? '-');
@@ -287,7 +485,7 @@ final class Console extends Router
         }
 
         // Render table with bold headers
-        $renderRow = function($values) use ($widths, $aligns, $stripAnsi) {
+        $renderRow = function ($values) use ($widths, $aligns, $stripAnsi) {
             $parts = [];
             foreach ($values as $i => $value) {
                 $cleanLength = strlen($stripAnsi($value));
@@ -300,6 +498,7 @@ final class Console extends Router
         };
 
         $this->bold()->log($renderRow($headers));
+
         foreach ($rows as $row) {
             $this->log($renderRow(array_map(fn($key) => (string)($row[$key] ?? '-'), $keys)));
         }
@@ -308,25 +507,25 @@ final class Console extends Router
     /** Logs a success message. */
     public function success(string $message)
     {
-        $this->green()->log('[OK] ' . $message);
+        $this->green()->log('[ok] ' . $message);
     }
 
     /** Logs an informational message. */
     public function info(string $message)
     {
-        $this->cyan()->log('[INFO] ' . $message);
+        $this->cyan()->log('[info] ' . $message);
     }
 
     /** Logs a warning message. */
     public function warn(string $message)
     {
-        $this->yellow()->write('[WARN] ' . $message, $this->stream('stderr'));
+        $this->yellow()->write($this->timestamp() . '[warning] ' . $message, $this->stream('stderr'));
     }
 
     /** Logs an error message. */
     public function error(string $message)
     {
-        $this->red()->write('[ERROR] ' . $message, $this->stream('stderr'));
+        $this->red()->write($this->timestamp() . '[error] ' . $message, $this->stream('stderr'));
     }
 
     public function write(string $message, $stream = null, bool $inPlace = false)
@@ -364,11 +563,14 @@ final class Console extends Router
         $line = sprintf('%s %d/%d (%d%%)', $label, $current, $total, $percent);
 
         if ($breakdown !== []) {
+
             $parts = [];
+
             foreach ($breakdown as $name => $counts) {
                 if (!is_array($counts) || count($counts) < 2) continue;
                 $parts[] = sprintf('%s: %d/%d', $name, $counts[0], $counts[1]);
             }
+
             if ($parts !== []) {
                 $line .= ' │ ' . implode(' │ ', array_slice($parts, 0, 4));
             }
@@ -416,9 +618,7 @@ final class Console extends Router
 
                     $codes = [...$this->codes, $this->styles[$name]];
 
-                    if ($arguments !== [] && is_string($arguments[0])) {
-                        return ($this->formatter)($arguments[0], $codes);
-                    }
+                    if ($arguments !== [] && is_string($arguments[0])) return ($this->formatter)($arguments[0], $codes);
 
                     return new self($codes, $this->styles, $this->formatter, $this->console);
                 }
@@ -445,13 +645,24 @@ final class Console extends Router
         };
     }
 
-    private function detect($stream)
+    /** Detecta si el stream es un terminal interactivo (TTY) */
+    private function isInteractive($stream): bool
     {
-        if (PHP_OS_FAMILY === 'Windows' && function_exists('sapi_windows_vt100_support')) {
-            @sapi_windows_vt100_support($stream, true);
+        return is_resource($stream) && stream_isatty($stream);
+    }
+
+    /** Habilita y detecta soporte de colores ANSI en el stream */
+    private function enableColors($stream): bool
+    {
+        // Habilitar VT100 en Windows si está disponible
+        if (PHP_OS_FAMILY === 'Windows') {
+            if (function_exists('sapi_windows_vt100_support')) {
+                return sapi_windows_vt100_support($stream, true);
+            }
+            return false;
         }
 
-        return function_exists('stream_isatty') && @stream_isatty($stream);
+        return $this->isInteractive($stream);
     }
 
     private function validStream($value)
@@ -464,11 +675,11 @@ final class Console extends Router
         $isStdout = $channel === 'stdout';
 
         if ($isStdout) {
-            $handle =& $this->stdout;
-            $flag =& $this->ownsStdout;
+            $handle = &$this->stdout;
+            $flag = &$this->ownsStdout;
         } else {
-            $handle =& $this->stderr;
-            $flag =& $this->ownsStderr;
+            $handle = &$this->stderr;
+            $flag = &$this->ownsStderr;
         }
 
         if ($resource !== null) {
@@ -485,13 +696,17 @@ final class Console extends Router
                 $handle = $builtin;
                 $flag = false;
             } else {
-                $fallback = $this->validStream(@fopen($isStdout ? 'php://stdout' : 'php://stderr', 'w'));
+                $fallback = $this->validStream(fopen($isStdout ? 'php://stdout' : 'php://stderr', 'w'));
                 $handle = $fallback;
                 $flag = $fallback !== null;
             }
         }
 
-        if ($isStdout) $this->supportsColors = $this->validStream($handle) && $this->detect($handle);
+        if ($isStdout) {
+            $this->isInteractive = $this->isInteractive($handle);
+            $this->withColors = $this->enableColors($handle);
+            $this->withTimestamps = !$this->isInteractive;
+        }
 
         return $this->validStream($handle) ? $handle : null;
     }
@@ -504,11 +719,16 @@ final class Console extends Router
         $owns = false;
     }
 
+    private function timestamp(): string
+    {
+        return $this->withTimestamps ? (new \DateTimeImmutable)->format('Y-m-d H:i:s.v') . ' ' : '';
+    }
+
     private function styled(string $message, array $codes)
     {
         if ($codes === []) return $message;
-        if (!$this->supportsColors) $this->stream('stdout');
-        if (!$this->supportsColors) return $message;
+        if (!$this->withColors) $this->stream('stdout');
+        if (!$this->withColors) return $message;
 
         $open = '';
         $close = '';

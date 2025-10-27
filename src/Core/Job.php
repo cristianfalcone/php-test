@@ -14,7 +14,7 @@ use RuntimeException;
 use Throwable;
 
 /**
- * Job scheduler with cron-based execution, concurrency control, and persistent state.
+ * Job 1.0 scheduler with cron-based execution, concurrency control, and persistent state.
  *
  * Supports 5-field (minute precision) and 6-field (second precision) cron expressions.
  * Manages job execution with database-backed state, leases, and error tracking.
@@ -25,11 +25,11 @@ final class Job
 
     /** @var array<string, array> Job configurations (legacy format for test compatibility) */
     private array $jobs = [];
-
-    private ?string $activeJobName = null;
+    private ?string $active = null;
     public private(set) bool $running = false;
     private ?DateTimeImmutable $nextWakeTime = null;
     private ClockInterface $clock;
+    private int $pendingDelay = 0;
 
     public function __construct(?ClockInterface $clock = null)
     {
@@ -74,9 +74,11 @@ final class Job
             'success'     => [],
             'error'       => [],
             'after'       => [],
+            'max_attempts' => 1,
+            'backoff_seconds' => 0,
         ];
 
-        $this->activeJobName = $name;
+        $this->active = $name;
 
         return $this;
     }
@@ -264,6 +266,18 @@ final class Job
         return $this->modifyJob(fn(array &$job) => $job['lease'] = max(60, $seconds));
     }
 
+    /** Sets maximum number of execution attempts (including initial attempt) */
+    public function retries(int $maxAttempts): self
+    {
+        return $this->modifyJob(fn(array &$job) => $job['max_attempts'] = max(1, $maxAttempts));
+    }
+
+    /** Sets backoff delay in seconds (linear: attempt * backoff) */
+    public function backoff(int $seconds): self
+    {
+        return $this->modifyJob(fn(array &$job) => $job['backoff_seconds'] = max(0, $seconds));
+    }
+
     /** Adds a hook to execute before the job handler */
     public function onBefore(callable $callback): self
     {
@@ -288,8 +302,8 @@ final class Job
         return $this->addHook('after', $callback);
     }
 
-    /** Dispatches a job to execute ASAP (enqueues it) */
-    public function dispatch(string $name, ?callable $handler = null): self
+    /** Dispatches a job to execute ASAP or after delay (enqueues it) */
+    public function dispatch(string $name, ?callable $handler = null, int $delaySeconds = 0): self
     {
         if (!isset($this->jobs[$name])) {
 
@@ -300,12 +314,26 @@ final class Job
 
         $this->prepareDatabase();
 
+        $delay = max(0, $delaySeconds > 0 ? $delaySeconds : $this->pendingDelay);
+        $enqueuedAt = $delay > 0
+            ? $this->clock->now()->modify("+{$delay} seconds")->format(self::DB_DATETIME_FORMAT)
+            : $this->nowAsDbString();
+
         $this->updateJobState($name, [
-            'enqueued_at' => $this->nowAsDbString(),
+            'enqueued_at' => $enqueuedAt,
             'last_run' => null,
             'lease_until' => null,
         ]);
 
+        $this->pendingDelay = 0; // Reset after use
+
+        return $this;
+    }
+
+    /** Sets delay in seconds for the next dispatch (chainable before dispatch) */
+    public function delay(int $seconds): self
+    {
+        $this->pendingDelay = max(0, $seconds);
         return $this;
     }
 
@@ -484,7 +512,15 @@ final class Job
             $isDispatched = !empty($row['enqueued_at']);
 
             if ($isDispatched) {
-                $pool[] = ['row' => $row, 'job' => $job, 'queue' => $queue];
+                $enqueuedAt = new DateTimeImmutable($row['enqueued_at']);
+
+                // Only execute if enqueued time has passed (supports delayed dispatch)
+                if ($enqueuedAt <= $now) {
+                    $pool[] = ['row' => $row, 'job' => $job, 'queue' => $queue];
+                } else {
+                    // Track next wake time for delayed jobs
+                    $nextWake = $this->earliestTime($nextWake, $enqueuedAt);
+                }
             } else {
 
                 $lastRun = ($row['last_run'] ?? null) ? new DateTimeImmutable($row['last_run']) : null;
@@ -821,7 +857,7 @@ final class Job
 
     private function modifyJob(callable $callback): self
     {
-        if ($this->activeJobName !== null) $callback($this->jobs[$this->activeJobName]);
+        if ($this->active !== null) $callback($this->jobs[$this->active]);
         return $this;
     }
 
@@ -845,25 +881,54 @@ final class Job
             'lease_until' => null,
             'last_error' => null,
             'enqueued_at' => null,
+            'fail_count' => 0, // Reset retry counter on success
         ]);
 
         Console::success("{$name}: {$job['cron']}");
     }
 
-    /** Records failed job execution */
+    /** Records failed job execution and schedules retry with backoff if configured */
     private function recordJobFailure(string $name, Throwable $e): void
     {
+        $job = $this->jobs[$name] ?? null;
+
+        if (!$job) {
+            Console::error("{$name}: " . $e->getMessage());
+            return;
+        }
+
+        // Get current fail count to calculate next attempt number
+        $row = $this->pdo()->prepare("SELECT fail_count FROM jobs WHERE name = :name");
+        $row->execute([':name' => $name]);
+        $currentFailCount = (int)($row->fetchColumn() ?: 0);
+        $row->closeCursor();
+
+        $nextAttempt = $currentFailCount + 1;
+        $maxAttempts = $job['max_attempts'] ?? 1;
+        $shouldRetry = $nextAttempt < $maxAttempts;
+
+        // Calculate backoff delay: linear backoff (attempt * backoff_seconds)
+        $enqueuedAt = null;
+        if ($shouldRetry && isset($job['backoff_seconds'])) {
+            $backoffDelay = $job['backoff_seconds'] * $nextAttempt;
+            $enqueuedAt = $this->clock->now()
+                ->modify("+{$backoffDelay} seconds")
+                ->format(self::DB_DATETIME_FORMAT);
+        }
+
         $this->pdo()->prepare("
             UPDATE jobs
-               SET last_run = :run, lease_until = NULL, last_error = :err, fail_count = fail_count + 1, enqueued_at = NULL
+               SET last_run = :run, lease_until = NULL, last_error = :err, fail_count = fail_count + 1, enqueued_at = :enqueued
              WHERE name = :name
         ")->execute([
             ':run' => $this->nowAsDbString(),
             ':err' => $e->getMessage(),
+            ':enqueued' => $enqueuedAt,
             ':name' => $name,
         ]);
 
-        Console::error("{$name}: " . $e->getMessage());
+        $retryMsg = $shouldRetry ? " (retry {$nextAttempt}/{$maxAttempts})" : " (max attempts reached)";
+        Console::error("{$name}: " . $e->getMessage() . $retryMsg);
     }
 
     private function nowAsDbString(): string
@@ -908,17 +973,11 @@ final readonly class CronParser
     {
         $tokens = preg_split('/\s+/', trim($expression));
 
-        if ($tokens === false || count($tokens) < 5 || count($tokens) > 6) {
+        if ($tokens === false || count($tokens) != 6) {
             throw new RuntimeException("Invalid cron expression: {$expression}");
         }
 
-        // Convert 5-field to 6-field by prepending '0' for seconds
-        if (count($tokens) === 5) {
-            [$min, $hour, $dom, $mon, $dow] = $tokens;
-            $sec = '0';
-        } else {
-            [$sec, $min, $hour, $dom, $mon, $dow] = $tokens;
-        }
+        [$sec, $min, $hour, $dom, $mon, $dow] = $tokens;
 
         return [
             'sec'  => self::expandField($sec, 0, 59, false),

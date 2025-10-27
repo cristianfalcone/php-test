@@ -344,17 +344,16 @@ Test::suite('Job', function () {
             );
         };
 
-        Test::assertTrue($match('0 0 1 * 0', '2024-12-01 00:00:00')); // domingo y día 1
-        Test::assertFalse($match('0 0 1 * 0', '2024-12-02 00:00:00')); // lunes 2
-        Test::assertTrue($match('15 10 * * 3', '2024-05-08 10:15:00'));
-        Test::assertTrue($match('15 10 10 * 3', '2024-05-10 10:15:00'));
-        Test::assertFalse($match('15 10 10 * 3', '2024-05-09 10:15:00'));
+        Test::assertTrue($match('0 0 0 1 * 0', '2024-12-01 00:00:00')); // domingo y día 1
+        Test::assertFalse($match('0 0 0 1 * 0', '2024-12-02 00:00:00')); // lunes 2
+        Test::assertTrue($match('0 15 10 * * 3', '2024-05-08 10:15:00'));
+        Test::assertTrue($match('0 15 10 10 * 3', '2024-05-10 10:15:00'));
+        Test::assertFalse($match('0 15 10 10 * 3', '2024-05-09 10:15:00'));
     });
 
-    Test::it('should evaluate five-field cron once per minute', function () {
-        // 5-field cron is converted to 6-field with second 0
-        $parsed = \Ajo\Core\CronParser::parse('* * * * *'); // becomes '0 * * * * *'
-        $moment = new DateTimeImmutable('2024-01-01 12:07:00'); // second 0
+    Test::it('should evaluate six-field cron once per minute', function () {
+        $parsed = \Ajo\Core\CronParser::parse('0 * * * * *');
+        $moment = new DateTimeImmutable('2024-01-01 12:07:00');
 
         $first = \Ajo\Core\CronEvaluator::evaluate($parsed, $moment, null);
         Test::assertTrue($first['due']);
@@ -820,6 +819,347 @@ Test::suite('Job', function () {
 
         Test::assertEquals(3, $count, 'All hooks of same type should execute');
     });
+
+    // RETRIES WITH BACKOFF TESTS =============================================
+
+    Test::it('should retry failed job up to max attempts', function ($state) {
+        $cli = Console::create();
+        Job::register($cli);
+
+        $attempts = 0;
+
+        Job::schedule('retry-job', function () use (&$attempts) {
+            $attempts++;
+            throw new RuntimeException('Simulated failure');
+        })
+            ->everyMinute()
+            ->retries(3)
+            ->backoff(0); // No delay for test speed
+
+        dispatch($cli, 'jobs:install');
+        Job::dispatch('retry-job');
+
+        // First attempt
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(1, $attempts, 'Should execute first attempt');
+
+        $jobRow = row($state, 'retry-job');
+        Test::assertEquals(1, (int)$jobRow['fail_count'], 'Should increment fail_count');
+        Test::assertNotNull($jobRow['enqueued_at'], 'Should re-enqueue for retry');
+
+        // Second attempt
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(2, $attempts, 'Should execute second attempt');
+
+        $jobRow = row($state, 'retry-job');
+        Test::assertEquals(2, (int)$jobRow['fail_count']);
+        Test::assertNotNull($jobRow['enqueued_at'], 'Should re-enqueue for retry');
+
+        // Third attempt (final)
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(3, $attempts, 'Should execute third attempt');
+
+        $jobRow = row($state, 'retry-job');
+        Test::assertEquals(3, (int)$jobRow['fail_count']);
+        Test::assertNull($jobRow['enqueued_at'], 'Should NOT re-enqueue after max attempts');
+
+        // Should not execute again
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(3, $attempts, 'Should not execute beyond max attempts');
+    });
+
+    Test::it('should reset fail_count on success after retries', function ($state) {
+        $cli = Console::create();
+        Job::register($cli);
+
+        $attempts = 0;
+
+        Job::schedule('eventually-succeeds', function () use (&$attempts) {
+            $attempts++;
+            if ($attempts < 3) {
+                throw new RuntimeException('Retry me');
+            }
+            // Success on 3rd attempt
+        })
+            ->everyMinute()
+            ->retries(5)
+            ->backoff(0);
+
+        dispatch($cli, 'jobs:install');
+        Job::dispatch('eventually-succeeds');
+
+        // First attempt - fails
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(1, $attempts);
+        Test::assertEquals(1, (int)row($state, 'eventually-succeeds')['fail_count']);
+
+        // Second attempt - fails
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(2, $attempts);
+        Test::assertEquals(2, (int)row($state, 'eventually-succeeds')['fail_count']);
+
+        // Third attempt - succeeds
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(3, $attempts);
+
+        $jobRow = row($state, 'eventually-succeeds');
+        Test::assertEquals(0, (int)$jobRow['fail_count'], 'Should reset fail_count on success');
+        Test::assertNull($jobRow['last_error'], 'Should clear error on success');
+        Test::assertNull($jobRow['enqueued_at'], 'Should clear enqueued_at on success');
+    });
+
+    Test::it('should apply linear backoff between retries', function ($state) {
+        $cli = Console::create();
+        $clock = new ManualClock('2024-01-01 12:00:00');
+        $jobs = new \Ajo\Core\Job($clock);
+        Job::swap($jobs);
+
+        $jobs->register($cli);
+
+        $jobs->schedule('backoff-job', function () {
+            throw new RuntimeException('Always fails');
+        })
+            ->everyMinute()
+            ->retries(4)
+            ->backoff(60); // 60 seconds per attempt
+
+        dispatch($cli, 'jobs:install');
+        $jobs->dispatch('backoff-job');
+
+        // First failure (attempt 1)
+        silence(fn() => $jobs->run());
+        $jobRow = row($state, 'backoff-job');
+        Test::assertEquals(1, (int)$jobRow['fail_count']);
+        // Next retry should be at: now + (60 * 1) = 12:01:00
+        Test::assertEquals('2024-01-01 12:01:00', $jobRow['enqueued_at'], 'First retry: 60s delay');
+
+        // Advance time to retry moment
+        $clock->setNow('2024-01-01 12:01:00');
+
+        // Second failure (attempt 2)
+        silence(fn() => $jobs->run());
+        $jobRow = row($state, 'backoff-job');
+        Test::assertEquals(2, (int)$jobRow['fail_count']);
+        // Next retry should be at: now + (60 * 2) = 12:03:00
+        Test::assertEquals('2024-01-01 12:03:00', $jobRow['enqueued_at'], 'Second retry: 120s delay');
+
+        // Advance time to next retry
+        $clock->setNow('2024-01-01 12:03:00');
+
+        // Third failure (attempt 3)
+        silence(fn() => $jobs->run());
+        $jobRow = row($state, 'backoff-job');
+        Test::assertEquals(3, (int)$jobRow['fail_count']);
+        // Next retry should be at: now + (60 * 3) = 12:06:00
+        Test::assertEquals('2024-01-01 12:06:00', $jobRow['enqueued_at'], 'Third retry: 180s delay');
+    });
+
+    Test::it('should not retry if retries is set to 1 (default)', function ($state) {
+        $cli = Console::create();
+        Job::register($cli);
+
+        $attempts = 0;
+
+        Job::schedule('no-retry', function () use (&$attempts) {
+            $attempts++;
+            throw new RuntimeException('Fail once');
+        })->everyMinute(); // No retries() call - defaults to 1
+
+        dispatch($cli, 'jobs:install');
+        Job::dispatch('no-retry');
+
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(1, $attempts, 'Should execute once');
+
+        $jobRow = row($state, 'no-retry');
+        Test::assertEquals(1, (int)$jobRow['fail_count']);
+        Test::assertNull($jobRow['enqueued_at'], 'Should NOT re-enqueue with default retries=1');
+
+        // Should not execute again
+        dispatch($cli, 'jobs:collect');
+        Test::assertEquals(1, $attempts, 'Should not retry');
+    });
+
+    // DELAYED DISPATCH TESTS =================================================
+
+    Test::it('should dispatch job with delay using dispatch parameter', function ($state) {
+        $cli = Console::create();
+        $clock = new ManualClock('2024-01-01 10:00:00');
+        $jobs = new \Ajo\Core\Job($clock);
+        Job::swap($jobs);
+
+        $jobs->register($cli);
+
+        $jobs->schedule('delayed-job', fn() => null)->everyMinute();
+
+        dispatch($cli, 'jobs:install');
+
+        // Dispatch with 300 second (5 minute) delay
+        $jobs->dispatch('delayed-job', null, 300);
+
+        $jobRow = row($state, 'delayed-job');
+        Test::assertEquals('2024-01-01 10:05:00', $jobRow['enqueued_at'], 'Should set enqueued_at 5 minutes in future');
+    });
+
+    Test::it('should dispatch job with delay using delay() method', function ($state) {
+        $cli = Console::create();
+        $clock = new ManualClock('2024-01-01 14:30:00');
+        $jobs = new \Ajo\Core\Job($clock);
+        Job::swap($jobs);
+
+        $jobs->register($cli);
+
+        $jobs->schedule('delayed-chain', fn() => null)->everyMinute();
+
+        dispatch($cli, 'jobs:install');
+
+        // Dispatch with delay using chain method
+        $jobs->delay(3600)->dispatch('delayed-chain'); // 1 hour delay
+
+        $jobRow = row($state, 'delayed-chain');
+        Test::assertEquals('2024-01-01 15:30:00', $jobRow['enqueued_at'], 'Should set enqueued_at 1 hour in future');
+    });
+
+    Test::it('should not execute delayed job before delay expires', function ($state) {
+        $cli = Console::create();
+        $clock = new ManualClock('2024-01-01 09:00:00');
+        $jobs = new \Ajo\Core\Job($clock);
+        Job::swap($jobs);
+
+        $jobs->register($cli);
+
+        $executed = false;
+
+        $jobs->schedule('wait-job', function () use (&$executed) {
+            $executed = true;
+        })->everyMinute();
+
+        dispatch($cli, 'jobs:install');
+
+        // Dispatch with 10 minute delay
+        $jobs->dispatch('wait-job', null, 600);
+
+        // Try to execute immediately - should not run
+        silence(fn() => $jobs->run());
+        Test::assertFalse($executed, 'Should not execute before delay expires');
+
+        // Advance time but not enough
+        $clock->setNow('2024-01-01 09:05:00');
+        silence(fn() => $jobs->run());
+        Test::assertFalse($executed, 'Should not execute before full delay');
+
+        // Advance to exactly when it should run
+        $clock->setNow('2024-01-01 09:10:00');
+        silence(fn() => $jobs->run());
+        Test::assertTrue($executed, 'Should execute once delay expires');
+    });
+
+    Test::it('should execute delayed job after delay expires', function ($state) {
+        $cli = Console::create();
+        $clock = new ManualClock('2024-01-01 20:00:00');
+        $jobs = new \Ajo\Core\Job($clock);
+        Job::swap($jobs);
+
+        $jobs->register($cli);
+
+        $executed = false;
+
+        $jobs->schedule('future-job', function () use (&$executed) {
+            $executed = true;
+        })->everyMinute();
+
+        dispatch($cli, 'jobs:install');
+
+        $jobs->delay(120)->dispatch('future-job'); // 2 minutes
+
+        // Advance past the delay
+        $clock->setNow('2024-01-01 20:03:00');
+
+        silence(fn() => $jobs->run());
+        Test::assertTrue($executed, 'Should execute after delay has passed');
+    });
+
+    Test::it('should support retries combined with delay', function ($state) {
+        $cli = Console::create();
+        $clock = new ManualClock('2024-01-01 08:00:00');
+        $jobs = new \Ajo\Core\Job($clock);
+        Job::swap($jobs);
+
+        $jobs->register($cli);
+
+        $attempts = 0;
+
+        $jobs->schedule('delayed-retry', function () use (&$attempts) {
+            $attempts++;
+            throw new RuntimeException('Always fail');
+        })
+            ->everyMinute()
+            ->retries(3)
+            ->backoff(30); // 30s backoff
+
+        dispatch($cli, 'jobs:install');
+
+        // Dispatch with initial 60 second delay
+        $jobs->dispatch('delayed-retry', null, 60);
+
+        // Should not execute before initial delay
+        silence(fn() => $jobs->run());
+        Test::assertEquals(0, $attempts, 'Should not execute before initial delay');
+
+        // Advance to when initial delay expires
+        $clock->setNow('2024-01-01 08:01:00');
+
+        // First attempt (fails)
+        silence(fn() => $jobs->run());
+        Test::assertEquals(1, $attempts);
+
+        $jobRow = row($state, 'delayed-retry');
+        Test::assertEquals(1, (int)$jobRow['fail_count']);
+        // Should schedule retry with backoff: 08:01:00 + 30s = 08:01:30
+        Test::assertEquals('2024-01-01 08:01:30', $jobRow['enqueued_at'], 'Should apply backoff after failure');
+
+        // Advance to retry time
+        $clock->setNow('2024-01-01 08:01:30');
+
+        // Second attempt (fails)
+        silence(fn() => $jobs->run());
+        Test::assertEquals(2, $attempts);
+
+        $jobRow = row($state, 'delayed-retry');
+        Test::assertEquals(2, (int)$jobRow['fail_count']);
+        // Should schedule retry with backoff: 08:01:30 + 60s = 08:02:30
+        Test::assertEquals('2024-01-01 08:02:30', $jobRow['enqueued_at'], 'Should apply progressive backoff');
+    });
+
+    Test::it('should execute ad-hoc delayed job', function ($state) {
+        $cli = Console::create();
+        $clock = new ManualClock('2024-01-01 16:00:00');
+        $jobs = new \Ajo\Core\Job($clock);
+        Job::swap($jobs);
+
+        $jobs->register($cli);
+
+        $executed = false;
+
+        dispatch($cli, 'jobs:install');
+
+        // Ad-hoc job with delay
+        $jobs->dispatch('adhoc-delayed', function () use (&$executed) {
+            $executed = true;
+        }, 180); // 3 minutes
+
+        $jobRow = row($state, 'adhoc-delayed');
+        Test::assertEquals('2024-01-01 16:03:00', $jobRow['enqueued_at']);
+
+        // Should not execute before delay
+        silence(fn() => $jobs->run());
+        Test::assertFalse($executed);
+
+        // Execute after delay
+        $clock->setNow('2024-01-01 16:03:00');
+        silence(fn() => $jobs->run());
+        Test::assertTrue($executed, 'Should execute ad-hoc delayed job');
+    });
 });
 
 /**
@@ -913,6 +1253,34 @@ function pdo($state): PDO
     }
 
     return $pdo;
+}
+
+/**
+ * Manual clock for testing time-dependent behavior
+ */
+final class ManualClock implements \Ajo\Core\ClockInterface
+{
+    private DateTimeImmutable $current;
+
+    public function __construct(string $initialTime)
+    {
+        $this->current = new DateTimeImmutable($initialTime);
+    }
+
+    public function now(): DateTimeImmutable
+    {
+        return $this->current;
+    }
+
+    public function setNow(string $time): void
+    {
+        $this->current = new DateTimeImmutable($time);
+    }
+
+    public function advance(int $seconds): void
+    {
+        $this->current = $this->current->modify("+{$seconds} seconds");
+    }
 }
 
 /**

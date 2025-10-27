@@ -91,8 +91,26 @@ final class Test
         $self->testPaths = $normalize($paths['tests'] ?? 'tests');
         $self->sourcePaths = $normalize($paths['src'] ?? 'src');
 
-        $cli->command('test', fn() => $self->run())->describe(sprintf('Runs tests defined in %s.', implode(', ', $self->testPaths)));
-        $cli->command('test:list', fn() => $self->list())->describe('Lists available test suites and cases.');
+        $cli->command('test', fn() => $self->run())
+            ->describe(sprintf('Runs tests defined in %s.', implode(', ', $self->testPaths)))
+            ->usage('[filter] [options]')
+            ->usage('[options]')
+            ->option('-b, --bail', 'Stop on first failure')
+            ->option('-c, --coverage', 'Generate coverage report (html or file path)')
+            ->option('--log', 'Export results to JUnit XML file')
+            ->option('-p, --parallel', 'Run tests in parallel (auto-detect CPU count or specify number)')
+            ->option('--filter', 'Filter by suite name, test name, or file path')
+            ->example('Console', 'Run tests matching "Console" (suite, test, or file)')
+            ->example('--filter=Job', 'Run tests matching "Job"')
+            ->example('--coverage=html', 'Generate HTML coverage report')
+            ->example('--parallel=4 --bail', 'Run with 4 workers, stop on first failure');
+
+        $cli->command('test:list', fn() => $self->list())
+            ->describe('Lists available test suites and cases.')
+            ->usage('[filter]')
+            ->option('--filter', 'Filter by suite name, test name, or file path')
+            ->example('Job', 'List tests matching "Job"')
+            ->example('--filter=Unit/Console', 'List tests from Console file');
 
         return $self;
     }
@@ -143,7 +161,8 @@ final class Test
             $self = self::$instance;
             $suite = &$self->suites[$self->current];
             $only = (bool)($options['only'] ?? false);
-            $suite['tests'][] = ['name' => $name, 'handler' => $self->wrap($handler), 'skip' => (bool)($options['skip'] ?? false), 'only' => $only];
+            $reflection = new \ReflectionFunction($handler);
+            $suite['tests'][] = ['name' => $name, 'handler' => $self->wrap($handler), 'skip' => (bool)($options['skip'] ?? false), 'only' => $only, 'line' => $reflection->getStartLine()];
             $suite['last'] = array_key_last($suite['tests']);
             if ($only) $self->hasOnly = true;
         });
@@ -205,27 +224,38 @@ final class Test
         if (!$condition) self::fail($message);
     }
 
+    /** Formats a value for display in error messages */
+    private static function formatValue($value): string
+    {
+        if (is_string($value)) return sprintf('"%s"', $value);
+        if (is_null($value)) return 'null';
+        if (is_bool($value)) return $value ? 'true' : 'false';
+        if (is_array($value)) return count($value) <= 5 ? var_export($value, true) : sprintf('Array(%d)', count($value));
+        if (is_object($value)) return get_class($value);
+        return (string)$value;
+    }
+
     /** Dynamic dispatcher for assertion methods */
     public static function __callStatic(string $name, array $args)
     {
         $msg = fn($i) => $args[$i] ?? '';
         $assertions = [
-            'assertTrue'                 => fn() => self::ensure($args[0] === true, $msg(1)                    ?: 'Expected true.'),
-            'assertFalse'                => fn() => self::ensure($args[0] === false, $msg(1)                   ?: 'Expected false.'),
-            'assertNull'                 => fn() => self::ensure($args[0] === null, $msg(1)                    ?: 'Expected null.'),
-            'assertNotNull'              => fn() => self::ensure($args[0] !== null, $msg(1)                    ?: 'Did not expect null.'),
-            'assertNotFalse'             => fn() => self::ensure($args[0] !== false, $msg(1)                   ?: 'Expected value other than false.'),
-            'assertSame'                 => fn() => self::ensure($args[0] === $args[1], $msg(2)                ?: sprintf('Expected identical value to %s.', var_export($args[0], true))),
-            'assertNotSame'              => fn() => self::ensure($args[0] !== $args[1], $msg(2)                ?: 'Expected different value.'),
-            'assertEquals'               => fn() => self::ensure($args[0] == $args[1], $msg(2)                 ?: 'Values do not match.'),
-            'assertNotEquals'            => fn() => self::ensure($args[0] != $args[1], $msg(2)                 ?: 'Values should not match.'),
-            'assertCount'                => fn() => self::ensure(count($args[1]) === $args[0], $msg(2)         ?: sprintf('Expected %d elements.', $args[0])),
-            'assertArrayHasKey'          => fn() => self::ensure(array_key_exists($args[0], $args[1]), $msg(2) ?: sprintf("Key '%s' does not exist in array.", (string)$args[0])),
-            'assertInstanceOf'           => fn() => self::ensure($args[1] instanceof $args[0], $msg(2)         ?: sprintf('Expected instance of %s.', $args[0])),
-            'assertStringContainsString' => fn() => self::ensure(str_contains($args[1], $args[0]), $msg(2)     ?: sprintf("Text does not contain '%s'.", $args[0])),
+            'assertTrue'                 => fn() => self::ensure($args[0] === true, $msg(1)                    ?: "Expected: true\nReceived: " . self::formatValue($args[0])),
+            'assertFalse'                => fn() => self::ensure($args[0] === false, $msg(1)                   ?: "Expected: false\nReceived: " . self::formatValue($args[0])),
+            'assertNull'                 => fn() => self::ensure($args[0] === null, $msg(1)                    ?: "Expected: null\nReceived: " . self::formatValue($args[0])),
+            'assertNotNull'              => fn() => self::ensure($args[0] !== null, $msg(1)                    ?: "Expected: not null\nReceived: null"),
+            'assertNotFalse'             => fn() => self::ensure($args[0] !== false, $msg(1)                   ?: "Expected: not false\nReceived: false"),
+            'assertSame'                 => fn() => self::ensure($args[0] === $args[1], $msg(2)                ?: "Expected: " . self::formatValue($args[0]) . "\nReceived: " . self::formatValue($args[1])),
+            'assertNotSame'              => fn() => self::ensure($args[0] !== $args[1], $msg(2)                ?: "Expected: not " . self::formatValue($args[0]) . "\nReceived: " . self::formatValue($args[1])),
+            'assertEquals'               => fn() => self::ensure($args[0] == $args[1], $msg(2)                 ?: "Expected: " . self::formatValue($args[0]) . "\nReceived: " . self::formatValue($args[1])),
+            'assertNotEquals'            => fn() => self::ensure($args[0] != $args[1], $msg(2)                 ?: "Expected: not " . self::formatValue($args[0]) . "\nReceived: " . self::formatValue($args[1])),
+            'assertCount'                => fn() => self::ensure(count($args[1]) === $args[0], $msg(2)         ?: "Expected: {$args[0]} elements\nReceived: " . count($args[1]) . " elements"),
+            'assertArrayHasKey'          => fn() => self::ensure(array_key_exists($args[0], $args[1]), $msg(2) ?: "Expected: array with key " . self::formatValue($args[0]) . "\nReceived: array without key"),
+            'assertInstanceOf'           => fn() => self::ensure($args[1] instanceof $args[0], $msg(2)         ?: "Expected: instance of {$args[0]}\nReceived: " . get_debug_type($args[1])),
+            'assertStringContainsString' => fn() => self::ensure(str_contains($args[1], $args[0]), $msg(2)     ?: "Expected: string containing " . self::formatValue($args[0]) . "\nReceived: " . self::formatValue($args[1])),
             'assertContains'             => fn() => self::ensure(
                 is_string($args[1]) ? str_contains($args[1], (string)$args[0]) : in_array($args[0], is_array($args[1]) ? $args[1] : iterator_to_array($args[1])),
-                $msg(2) ?: 'Expected value not found.'
+                $msg(2) ?: "Expected: contains " . self::formatValue($args[0]) . "\nReceived: does not contain"
             ),
         ];
 
@@ -257,13 +287,25 @@ final class Test
     /** Executes tests according to console arguments */
     public function run()
     {
-        ['bail' => $bail, 'filter' => $filter, 'coverage' => $coverage, 'log' => $log, 'parallel' => $workers] = $this->options(Console::arguments());
+        $opts = Console::options();
+
+        $bail = (bool)($opts['bail'] ?? false);
+        // Support both --filter=X and positional argument
+        $filter = $opts['filter'] ?? $opts['_'][0] ?? null;
+        $coverage = $opts['coverage'] ?? null;
+        $log = $opts['log'] ?? null;
+
+        // Handle parallel option: boolean true = auto-detect CPUs, number = specific count
+        $workers = match (true) {
+            !isset($opts['parallel']) => 1,
+            $opts['parallel'] === true => $this->detectCpuCount(),
+            is_numeric($opts['parallel']) => max(1, (int)$opts['parallel']),
+            default => 1,
+        };
 
         if (!$this->load()) return 1;
 
-        if ($workers > 1 && function_exists('pcntl_fork')) {
-            return $this->parallel($workers, $bail, $filter, $coverage, $log);
-        }
+        if ($workers > 1 && function_exists('pcntl_fork')) return $this->parallel($workers, $bail, $filter, $coverage, $log);
 
         return $this->sequential($bail, $filter, $coverage, $log);
     }
@@ -289,6 +331,7 @@ final class Test
             if ($log && !$isParallel) $this->writeLog($log, microtime(true) - $startedAt);
             return $exitCode;
         };
+
         $fail = function () use ($bail, $bailout, &$exitCode) {
             if ($bail) return $bailout(1);
             $exitCode = 1;
@@ -296,25 +339,27 @@ final class Test
         };
 
         foreach ($this->queue as $suiteId) {
+
             $suite = &$this->suites[$suiteId];
             $tests = $this->filter($suite, $filter);
 
             if ($tests === []) continue;
 
             $title = $suite['title'];
-            $class = $this->classname($suite['file']);
+            $base = getcwd() . '/';
+            $class = str_starts_with($suite['file'], $base) ? substr($suite['file'], strlen($base)) : $suite['file'];
 
             if (!$isParallel) {
                 Console::blank();
                 Console::log(Console::bold($title));
             }
 
-            $record = fn($type, $name, $seconds = null, $error = null, $testIndex = null) => $isParallel
-                ? $this->incrementMemory($shm, $suiteId, compact('type', 'name', 'seconds', 'testIndex') + ['suite' => $title, 'suiteId' => $suiteId, 'classname' => $class, 'error' => $error ? $this->normalizeError($error) : null])
-                : $this->render($type, $name, $seconds, $error ? $this->normalizeError($error) : null, $title, $class);
+            $record = fn($type, $name, $seconds = null, $error = null, $testIndex = null, $line = null) => $isParallel
+                ? $this->incrementMemory($shm, $suiteId, compact('type', 'name', 'seconds', 'testIndex', 'line') + ['suite' => $title, 'suiteId' => $suiteId, 'classname' => $class, 'error' => $error ? $this->normalizeError($error) : null])
+                : $this->render($type, $name, $seconds, $error ? $this->normalizeError($error) : null, $title, $class, $line);
 
             if ($suite['skip']) {
-                foreach ($tests as $testIndex => $test) $record('skip', $test['name'], testIndex: $testIndex);
+                foreach ($tests as $testIndex => $test) $record('skip', $test['name'], testIndex: $testIndex, line: $test['line'] ?? null);
                 continue;
             }
 
@@ -327,29 +372,30 @@ final class Test
             }
 
             foreach ($tests as $testIndex => $test) {
+
                 if ($test['skip']) {
-                    $record('skip', $test['name'], testIndex: $testIndex);
+                    $record('skip', $test['name'], testIndex: $testIndex, line: $test['line'] ?? null);
                     continue;
                 }
 
                 $started = microtime(true);
 
                 if (!$runHooks($suite['beforeEach'], $test['name'] . ' (before each)')) {
-                    $record('fail', $test['name'] . ' (before each)', testIndex: $testIndex);
+                    $record('fail', $test['name'] . ' (before each)', testIndex: $testIndex, line: $test['line'] ?? null);
                     if ($fail()) return $bailout();
                     continue;
                 }
 
                 try {
                     ($test['handler'])($state);
-                    $record('pass', $test['name'], microtime(true) - $started, testIndex: $testIndex);
+                    $record('pass', $test['name'], microtime(true) - $started, testIndex: $testIndex, line: $test['line'] ?? null);
                 } catch (Throwable $error) {
-                    $record('fail', $test['name'], microtime(true) - $started, $error, $testIndex);
+                    $record('fail', $test['name'], microtime(true) - $started, $error, $testIndex, $test['line'] ?? null);
                     if ($fail()) return $bailout();
                 }
 
                 if (!$runHooks($suite['afterEach'], $test['name'] . ' (after each)')) {
-                    $record('fail', $test['name'] . ' (after each)', testIndex: $testIndex);
+                    $record('fail', $test['name'] . ' (after each)', testIndex: $testIndex, line: $test['line'] ?? null);
                     if ($fail()) return $bailout();
                 }
             }
@@ -410,7 +456,7 @@ final class Test
     // OUTPUT =================================================================
 
     /** Renders an individual test result to console */
-    private function render(string $type, string $name, ?float $seconds = null, $error = null, ?string $suite = null, ?string $classname = null)
+    private function render(string $type, string $name, ?float $seconds = null, $error = null, ?string $suite = null, ?string $classname = null, ?int $line = null)
     {
         [$badge, $color, $counter] = match ($type) {
             'pass' => ['[PASS]', 'green', 'passed'],
@@ -418,24 +464,74 @@ final class Test
             'skip' => ['[SKIP]', 'yellow', 'skipped'],
         };
 
+        $location = '';
+        if ($classname && $line) {
+            $base = getcwd() . '/';
+            $filePath = str_starts_with($classname, $base)
+                ? substr($classname, strlen($base))
+                : $classname;
+            $location = ' ' . Console::dim($filePath . ':' . $line);
+        }
+
         Console::log(sprintf(
-            '  %s %s %s',
+            '  %s %s %s%s',
             Console::$color($badge),
             $name,
-            $seconds ? Console::dim(sprintf('(%s)', $this->duration($seconds))) : ''
+            $seconds ? Console::dim(sprintf('(%s)', $this->duration($seconds))) : '',
+            $location
         ));
 
         $normalized = $error ? $this->normalizeError($error) : null;
 
         if ($normalized) {
-            Console::red()->log('    ' . $normalized['message']);
-            Console::dim()->log(sprintf('    at %s:%d', $normalized['file'], $normalized['line']));
-            array_map(fn($f) => Console::dim()->log(sprintf(
-                '      %s:%d %s()',
-                $f['file'],
-                $f['line'],
-                $f['function']
-            )), array_slice($normalized['trace'], 0, 6));
+            Console::blank();
+
+            // Show code snippet if available - find first non-test-runner frame
+            $errorLine = null;
+            $errorFile = null;
+            $testRunnerFile = __FILE__;
+
+            // If error is from test runner, find first frame from actual test
+            if ($normalized['file'] === $testRunnerFile) {
+                foreach ($normalized['trace'] as $frame) {
+                    if ($frame['file'] !== $testRunnerFile && $frame['file'] !== '[internal]') {
+                        $errorFile = $frame['file'];
+                        $errorLine = $frame['line'];
+                        break;
+                    }
+                }
+            } else {
+                $errorFile = $normalized['file'];
+                $errorLine = $normalized['line'];
+            }
+
+            if ($errorFile && $errorLine) {
+                $snippet = $this->getCodeSnippet($errorFile, $errorLine, 1);
+                if ($snippet) {
+                    foreach ($snippet as $lineNum => $code) {
+                        $prefix = $lineNum === $errorLine ? '  > ' : '    ';
+                        Console::dim()->log(sprintf('%s%d: %s', $prefix, $lineNum, $code));
+                    }
+                    Console::blank();
+                }
+            }
+
+            // Show error message (handle multiline messages)
+            $lines = explode("\n", $normalized['message']);
+            foreach ($lines as $msgLine) {
+                Console::red()->log('    ' . $msgLine);
+            }
+            Console::blank();
+
+            // Show filtered stack trace
+            $filtered = $this->filterStackTrace($normalized['trace'], $classname);
+            if (!empty($filtered)) {
+                foreach (array_slice($filtered, 0, 3) as $frame) {
+                    Console::dim()->log(sprintf('    at %s', $frame));
+                }
+            } else {
+                Console::dim()->log(sprintf('    at %s:%d', $normalized['file'], $normalized['line']));
+            }
         }
 
         $this->summary[$counter]++;
@@ -493,7 +589,8 @@ final class Test
                 $r['seconds'] ?? null,
                 $r['error'] ?? null,
                 $r['suite'],
-                $r['classname']
+                $r['classname'],
+                $r['line'] ?? null
             ));
         }
     }
@@ -525,18 +622,10 @@ final class Test
     /** Writes results in JUnit XML format */
     private function writeLog(string $file, float $totalTime)
     {
-        $xml = $this->xml();
         $suites = [];
         foreach ($this->results as $r) $suites[$r['suite']][] = $r;
 
-        $xml->startElement('testsuites');
-        $this->attrs($xml, [
-            'tests' => array_sum($this->summary),
-            'failures' => $this->summary['failed'],
-            'errors' => 0,
-            'time' => sprintf('%.6f', $totalTime)
-        ]);
-
+        $suitesXml = [];
         foreach ($suites as $suiteName => $tests) {
             $stats = array_reduce($tests, fn($c, $t) => [
                 'failures' => $c['failures'] + ($t['status'] === 'fail'),
@@ -544,89 +633,171 @@ final class Test
                 'time' => $c['time'] + $t['time']
             ], ['failures' => 0, 'skipped' => 0, 'time' => 0.0]);
 
-            $xml->startElement('testsuite');
-            $this->attrs($xml, [
-                'name' => $suiteName,
-                'tests' => count($tests),
-                'failures' => $stats['failures'],
-                'errors' => 0,
-                'skipped' => $stats['skipped'],
-                'time' => sprintf('%.6f', $stats['time'])
-            ]);
-
-            foreach ($tests as $test) {
-                $xml->startElement('testcase');
-                $this->attrs($xml, ['name' => $test['name'], 'classname' => $test['classname'], 'time' => sprintf('%.6f', $test['time'])]);
+            $testsXml = array_map(function ($test) {
+                $testcase = sprintf(
+                    '<testcase name="%s" classname="%s" time="%.6f">',
+                    $this->escape($test['name']),
+                    $this->escape($test['classname']),
+                    $test['time']
+                );
 
                 if ($test['status'] === 'fail') {
                     $e = $test['error'];
                     $type = str_contains($e['message'], 'AssertionError') ? 'failure' : 'error';
-                    $xml->startElement($type);
-                    $this->attrs($xml, ['message' => $e['message'], 'type' => $type === 'failure' ? 'AssertionError' : 'RuntimeException']);
-                    $xml->text(sprintf("%s:%d\n", $e['file'], $e['line']) . implode('', array_map(fn($f) => sprintf("  at %s:%d %s()\n", $f['file'], $f['line'], $f['function']), array_slice($e['trace'], 0, 10))));
-                    $xml->endElement();
+                    $errorType = $type === 'failure' ? 'AssertionError' : 'RuntimeException';
+                    $trace = sprintf("%s:%d\n", $e['file'], $e['line']) . implode('', array_map(
+                        fn($f) => sprintf("  at %s:%d %s()\n", $f['file'], $f['line'], $f['function']),
+                        array_slice($e['trace'], 0, 10)
+                    ));
+                    $testcase .= sprintf('<%s message="%s" type="%s">%s</%s>', $type, $this->escape($e['message']), $errorType, $this->escape($trace), $type);
                 } elseif ($test['status'] === 'skip') {
-                    $xml->writeElement('skipped', '');
+                    $testcase .= '<skipped/>';
                 }
 
-                $xml->endElement();
-            }
+                return $testcase . '</testcase>';
+            }, $tests);
 
-            $xml->endElement();
+            $suitesXml[] = sprintf(
+                '<testsuite name="%s" tests="%d" failures="%d" errors="0" skipped="%d" time="%.6f">%s</testsuite>',
+                $this->escape($suiteName),
+                count($tests),
+                $stats['failures'],
+                $stats['skipped'],
+                $stats['time'],
+                implode('', $testsXml)
+            );
         }
 
-        $xml->endElement();
-        file_put_contents($file, $xml->outputMemory());
+        $xml = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>%s<testsuites tests="%d" failures="%d" errors="0" time="%.6f">%s</testsuites>',
+            "\n",
+            array_sum($this->summary),
+            $this->summary['failed'],
+            $totalTime,
+            implode('', $suitesXml)
+        );
+
+        file_put_contents($file, $xml);
     }
 
-    /** Writes code coverage in Clover XML format */
+    /** Writes code coverage in Cobertura XML format */
     private function writeCoverage(string $file, array $coverage)
     {
-        $xml = $this->xml();
         $summary = $this->coverageSummary($coverage);
-        $metrics = fn($covered, $total, $loc = null, $files = null) => $this->attrs($xml, compact('loc', 'files') + [
-            'ncloc' => $total,
-            'classes' => 0,
-            'methods' => 0,
-            'coveredmethods' => 0,
-            'conditionals' => 0,
-            'coveredconditionals' => 0,
-            'statements' => $total,
-            'coveredstatements' => $covered,
-            'elements' => $total,
-            'coveredelements' => $covered
-        ]);
+        $lineRate = $summary['total'] > 0 ? $summary['covered'] / $summary['total'] : 0;
+        $base = getcwd();
 
-        $xml->startElement('coverage');
-        $this->attrs($xml, ['generated' => time()]);
-        $xml->startElement('project');
-        $this->attrs($xml, ['timestamp' => time()]);
-
-        foreach ($coverage as $path => $flags) {
-            $xml->startElement('file');
-            $this->attrs($xml, ['name' => $path]);
-
+        $classesXml = array_map(function ($path, $flags) use ($base) {
             [$covered, $total] = [0, 0];
-            foreach ($flags as $line => $flag) {
-                if ($flag === 0) continue;
-                $xml->startElement('line');
-                $this->attrs($xml, ['num' => $line, 'type' => 'stmt', 'count' => $flag > 0 ? 1 : 0]);
-                $xml->endElement();
+            $lines = array_map(function ($line, $flag) use (&$covered, &$total) {
+                if ($flag === 0) return '';
                 $flag > 0 && $covered++;
                 $total++;
-            }
+                return sprintf('<line number="%d" hits="%d"/>', $line, $flag > 0 ? 1 : 0);
+            }, array_keys($flags), $flags);
 
-            $xml->startElement('metrics');
-            $metrics($covered, $total, count($flags));
-            $xml->endElement();
-            $xml->endElement();
+            $rate = $total > 0 ? $covered / $total : 0;
+            $name = str_starts_with($path, $base . '/') ? substr($path, strlen($base) + 1) : $path;
+
+            return sprintf(
+                '<class name="%s" filename="%s" line-rate="%.4f" branch-rate="1" complexity="0"><methods/><lines>%s</lines></class>',
+                $this->escape(str_replace(['/', '.php'], ['_', ''], $name)),
+                $this->escape($name),
+                $rate,
+                implode('', $lines)
+            );
+        }, array_keys($coverage), $coverage);
+
+        $xml = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>%s<!DOCTYPE coverage SYSTEM "http://cobertura.sourceforge.net/xml/coverage-04.dtd">%s<coverage line-rate="%.4f" branch-rate="1" lines-covered="%d" lines-valid="%d" branches-covered="0" branches-valid="0" complexity="0" version="1.0" timestamp="%d"><sources><source>%s</source></sources><packages><package name="app" line-rate="%.4f" branch-rate="1" complexity="0"><classes>%s</classes></package></packages></coverage>',
+            "\n",
+            "\n",
+            $lineRate,
+            $summary['covered'],
+            $summary['total'],
+            time(),
+            $this->escape($base),
+            $lineRate,
+            implode('', $classesXml)
+        );
+
+        file_put_contents($file, $xml);
+    }
+
+    /** Generates HTML coverage report */
+    private function writeHtmlCoverage(array $coverage)
+    {
+        $dir = 'coverage';
+        !is_dir($dir) && mkdir($dir, 0755, true);
+
+        $summary = $this->coverageSummary($coverage);
+        $badge = fn($pct) => sprintf(
+            '<span style="background:%s;color:white;padding:4px 8px;border-radius:3px;font-weight:bold">%.2f%%</span>',
+            $pct >= 90 ? '#22c55e' : ($pct >= 75 ? '#eab308' : '#ef4444'),
+            $pct
+        );
+
+        $css = 'body{font-family:system-ui,sans-serif;margin:20px;background:#f9fafb}h1{color:#111827}table{width:100%;border-collapse:collapse;background:white;box-shadow:0 1px 3px rgba(0,0,0,0.1)}th,td{padding:12px;text-align:left;border-bottom:1px solid #e5e7eb}th{background:#f3f4f6;font-weight:600}tr:hover{background:#f9fafb}a{color:#2563eb;text-decoration:none}a:hover{text-decoration:underline}.right{text-align:right}';
+        $codeCss = 'body{font-family:system-ui,sans-serif;margin:0;background:#f9fafb}h1{margin:20px;color:#111827}.code{background:white;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin:20px}pre{margin:0;padding:0;font-family:monospace;font-size:13px;line-height:1.5}.line{display:flex;border-bottom:1px solid #f3f4f6}.num{background:#f9fafb;color:#6b7280;padding:0 12px;min-width:50px;text-align:right;user-select:none}.src{flex:1;padding:0 12px;white-space:pre}.covered{background:#dcfce7}.uncovered{background:#fee2e2}a{margin:20px;display:inline-block;color:#2563eb;text-decoration:none}a:hover{text-decoration:underline}';
+
+        // Index page
+        $rows = array_map(fn($file, $data) => sprintf(
+            '<tr><td>%s</td><td><a href="%s">%s</a></td><td class="right">%d/%d</td></tr>',
+            $badge($data['percent']),
+            htmlspecialchars(str_replace(['/', '.php'], ['_', ''], $file) . '.html'),
+            htmlspecialchars($file),
+            $data['covered'],
+            $data['total']
+        ), array_keys($summary['filesBreakdown']), $summary['filesBreakdown']);
+
+        $totalRow = sprintf(
+            '<tr style="font-weight:bold;border-top:2px solid #9ca3af"><td>%s</td><td>Total (%d files)</td><td class="right">%d/%d</td></tr>',
+            $badge($summary['percent']),
+            $summary['files'],
+            $summary['covered'],
+            $summary['total']
+        );
+
+        file_put_contents("$dir/index.html", sprintf(
+            '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Coverage Report</title><style>%s</style></head><body><h1>Code Coverage Report</h1><table><thead><tr><th>Coverage</th><th>File</th><th class="right">Lines</th></tr></thead><tbody>%s%s</tbody></table></body></html>',
+            $css,
+            implode('', $rows),
+            $totalRow
+        ));
+
+        // Individual file pages
+        $base = getcwd() . '/';
+
+        foreach ($coverage as $path => $flags) {
+            $name = str_starts_with($path, $base) ? substr($path, strlen($base)) : $path;
+            $htmlFile = str_replace(['/', '.php'], ['_', ''], $name) . '.html';
+            $source = file_get_contents($path);
+            $lines = explode("\n", $source);
+
+            $rendered = array_map(function ($i) use ($lines, $flags) {
+                $lineNum = $i + 1;
+                $code = htmlspecialchars($lines[$i] ?? '');
+                $flag = $flags[$lineNum] ?? 0;
+                $class = $flag > 0 ? 'covered' : ($flag < 0 ? 'uncovered' : '');
+                return sprintf('<div class="line %s"><span class="num">%d</span><span class="src">%s</span></div>', $class, $lineNum, $code);
+            }, array_keys($lines));
+
+            $stats = array_reduce($flags, fn($c, $f) => [
+                'covered' => $c['covered'] + ($f > 0 ? 1 : 0),
+                'total' => $c['total'] + ($f !== 0 ? 1 : 0)
+            ], ['covered' => 0, 'total' => 0]);
+
+            $pct = $stats['total'] > 0 ? ($stats['covered'] / $stats['total']) * 100 : 0;
+
+            file_put_contents("$dir/$htmlFile", sprintf(
+                '<!DOCTYPE html><html><head><meta charset="utf-8"><title>%s - Coverage</title><style>%s</style></head><body><a href="index.html">&larr; Back to index</a><h1>%s %s</h1><div class="code"><pre>%s</pre></div></body></html>',
+                htmlspecialchars($name),
+                $codeCss,
+                htmlspecialchars($name),
+                $badge($pct),
+                implode('', $rendered)
+            ));
         }
-
-        $xml->startElement('metrics');
-        $metrics($summary['covered'], $summary['total'], null, $summary['files']);
-        $xml->endElement();
-        $xml->endElement();
-        file_put_contents($file, $xml->outputMemory());
     }
 
     // PARALLEL ===============================================================
@@ -740,6 +911,7 @@ final class Test
         $coverage = \pcov\collect(1, $files);
         \pcov\stop();
 
+        if ($coveragePath === 'html') return $this->writeHtmlCoverage($coverage) ?: $coverage;
         if (is_string($coveragePath)) return $this->writeCoverage($coveragePath, $coverage) ?: $coverage;
 
         $summary = $this->coverageSummary($coverage);
@@ -780,8 +952,7 @@ final class Test
      */
     private function coverageSummary(array $coverage)
     {
-        $first = $this->sourcePaths[0] ?? '';
-        $base = $first ? rtrim(realpath(is_dir($first) ? $first : dirname($first)) ?: $first, '/') . '/' : dirname(__DIR__) . '/';
+        $base = getcwd() . '/';
         [$files, $coveredTotal, $linesTotal] = [[], 0, 0];
 
         foreach ($coverage as $file => $flags) {
@@ -790,7 +961,7 @@ final class Test
 
             if ($total === 0) continue;
 
-            $name = str_starts_with($file, $base) ? substr($file, strlen($base)) : basename($file);
+            $name = str_starts_with($file, $base) ? substr($file, strlen($base)) : $file;
             $files[$name] = compact('covered', 'total') + ['percent' => ($covered / $total) * 100];
             $coveredTotal += $covered;
             $linesTotal += $total;
@@ -836,8 +1007,12 @@ final class Test
             return 0;
         }
 
-        $filter = $this->options(Console::arguments())['filter'];
+        $opts = Console::options();
+        // Support both --filter=X and positional argument
+        $filter = $opts['filter'] ?? $opts['_'][0] ?? null;
         $shown = 0;
+
+        $base = getcwd() . '/';
 
         foreach ($this->queue as $suiteId) {
             $suite = $this->suites[$suiteId];
@@ -846,9 +1021,17 @@ final class Test
             if ($tests === []) continue;
 
             $shown++;
+            $filePath = $suite['file'] && str_starts_with($suite['file'], $base)
+                ? substr($suite['file'], strlen($base))
+                : $suite['file'];
+
             Console::log(Console::bold($suite['title']));
-            foreach ($tests as $test) Console::log('  - ' . $test['name']);
-            if ($suite['file']) Console::dim()->log('    ' . $suite['file']);
+            foreach ($tests as $test) {
+                $location = ($filePath && isset($test['line']))
+                    ? ' ' . Console::dim($filePath . ':' . $test['line'])
+                    : '';
+                Console::log('  ' . $test['name'] . $location);
+            }
             Console::blank();
         }
 
@@ -886,33 +1069,10 @@ final class Test
         return $self->tap(fn() => $self->suites[$self->current][$slot][] = $self->wrap($handler));
     }
 
-    /** Converts file path to a classname */
-    private function classname($file)
+    /** Escapes values for safe XML output */
+    private function escape($value)
     {
-        if (!$file) return 'Tests';
-
-        // Find the common base from testPaths
-        $base = $this->testPaths[0] ?? '';
-        $base = is_dir($base) ? rtrim($base, '/') . '/' : dirname($base) . '/';
-
-        return str_replace(['/', '.php'], ['\\', ''], substr($file, strlen($base)));
-    }
-
-    /** Creates an XMLWriter configured for formatted output */
-    private function xml()
-    {
-        $xml = new \XMLWriter();
-        $xml->openMemory();
-        $xml->setIndent(true);
-        $xml->setIndentString('  ');
-        $xml->startDocument('1.0', 'UTF-8');
-        return $xml;
-    }
-
-    /** Writes attributes in batch to an XML element */
-    private function attrs($xml, array $attributes)
-    {
-        foreach ($attributes as $k => $v) if ($v !== null) $xml->writeAttribute($k, is_string($v) ? $v : (string)$v);
+        return htmlspecialchars((string)$value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
     }
 
     /** Normalizes throwable data into a standard array structure */
@@ -923,7 +1083,8 @@ final class Test
         $normalizeTrace = static fn($frames) => array_map(static fn($f) => [
             'file' => $f['file'] ?? '[internal]',
             'line' => $f['line'] ?? 0,
-            'function' => $f['function'] ?? 'closure'
+            'function' => $f['function'] ?? 'closure',
+            'class' => $f['class'] ?? null,
         ], $frames);
 
         if (is_array($error)) {
@@ -937,6 +1098,57 @@ final class Test
             'line' => $error->getLine(),
             'trace' => $normalizeTrace($error->getTrace()),
         ];
+    }
+
+    /** Gets code snippet around a specific line */
+    private function getCodeSnippet(string $file, int $line, int $context = 1): array
+    {
+        if (!is_file($file) || !is_readable($file)) return [];
+
+        $lines = file($file);
+        if ($lines === false) return [];
+
+        $start = max(0, $line - $context - 1);
+        $end = min(count($lines), $line + $context);
+        $snippet = [];
+
+        for ($i = $start; $i < $end; $i++) {
+            $snippet[$i + 1] = rtrim($lines[$i]);
+        }
+
+        return $snippet;
+    }
+
+    /** Filters stack trace to show only relevant frames */
+    private function filterStackTrace(array $trace, ?string $testFile): array
+    {
+        $base = getcwd() . '/';
+        $testRunnerFile = __FILE__;
+
+        $filtered = [];
+        foreach ($trace as $frame) {
+            // Skip internal test runner frames
+            if ($frame['file'] === $testRunnerFile) continue;
+            if ($frame['file'] === '[internal]') continue;
+
+            // Format the frame
+            $file = str_starts_with($frame['file'], $base)
+                ? substr($frame['file'], strlen($base))
+                : $frame['file'];
+
+            $func = $frame['function'];
+            if ($frame['class'] ?? false) {
+                $func = $frame['class'] . '->' . $func . '()';
+            } elseif ($func === '{closure}' || str_contains($func, '{closure')) {
+                $func = '{closure}';
+            } else {
+                $func .= '()';
+            }
+
+            $filtered[] = sprintf('%s (%s:%d)', $func, $file, $frame['line']);
+        }
+
+        return $filtered;
     }
 
     /** Normalizes callables to closures with consistent signature */
@@ -983,7 +1195,11 @@ final class Test
         if ($respectOnly && $this->hasOnly && !$suite['only']) $tests = array_filter($tests, static fn($test) => $test['only']);
         if ($filter) {
             $needle = strtolower($filter);
-            $tests = array_filter($tests, static fn($test) => str_contains(strtolower($suite['title']), $needle) || str_contains(strtolower($test['name']), $needle));
+            $tests = array_filter($tests, static fn($test) =>
+                str_contains(strtolower($suite['title']), $needle) ||
+                str_contains(strtolower($test['name']), $needle) ||
+                str_contains(strtolower($suite['file'] ?? ''), $needle)
+            );
         }
         return array_values($tests);
     }
@@ -1000,30 +1216,13 @@ final class Test
         }
     }
 
-    /** Parses console arguments to extract options */
-    private function options(array $arguments)
+    /** Detects the number of CPU cores available */
+    private function detectCpuCount()
     {
-        $options = ['filter' => null, 'bail' => false, 'coverage' => null, 'log' => null, 'parallel' => 1];
-        $cpuCount = fn() => match (PHP_OS_FAMILY) {
+        return match (PHP_OS_FAMILY) {
             'Linux' => (int)@shell_exec('nproc') ?: 4,
             'Darwin' => (int)@shell_exec('sysctl -n hw.ncpu') ?: 4,
             default => 4
         };
-
-        foreach ($arguments as $arg) {
-            match (true) {
-                in_array($arg, ['--bail', '-b']) => $options['bail'] = true,
-                in_array($arg, ['--coverage', '-c']) => $options['coverage'] = true,
-                str_starts_with($arg, '--coverage=') => $options['coverage'] = substr($arg, 11) ?: null,
-                str_starts_with($arg, '--log=') => $options['log'] = substr($arg, 6) ?: null,
-                str_starts_with($arg, '--filter=') => $options['filter'] = substr($arg, 9) ?: null,
-                in_array($arg, ['--parallel', '-p']) => $options['parallel'] = $cpuCount(),
-                str_starts_with($arg, '--parallel=') => $options['parallel'] = max(1, (int)substr($arg, 11)),
-                $options['filter'] === null => $options['filter'] = $arg ?: null,
-                default => null
-            };
-        }
-
-        return $options;
     }
 }

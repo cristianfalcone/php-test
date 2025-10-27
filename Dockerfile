@@ -5,11 +5,11 @@ ARG APP_ENV=production
 
 # Build and runtime packages for extensions
 RUN set -eux; \
-  apk add --no-cache --virtual .build-deps $PHPIZE_DEPS icu-dev linux-headers libxml2-dev \
-  && apk add --no-cache icu-libs libxml2 curl ca-certificates bash tzdata su-exec shadow \
+  apk add --no-cache --virtual .build-deps $PHPIZE_DEPS icu-dev linux-headers \
+  && apk add --no-cache icu-libs curl ca-certificates bash tzdata su-exec shadow \
   # native extensions
   && docker-php-ext-configure intl \
-  && docker-php-ext-install -j$(nproc) intl pcntl pdo_mysql sysvsem sysvshm xml \
+  && docker-php-ext-install -j$(nproc) intl pcntl pdo_mysql sysvsem sysvshm \
   # optional extensions only in development
   && if [ "$APP_ENV" = "development" ]; then \
     pecl install xdebug pcov; \

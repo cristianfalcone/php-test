@@ -19,9 +19,9 @@ function dispatch(
     array $arguments = [],
     bool $captureStreams = true
 ): array {
-    [$stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors] = statics();
+    [$stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isInteractive, $withColors, $withTimestamps] = statics();
 
-    $snapshot = snapshot($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors, $cli);
+    $snapshot = snapshot($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isInteractive, $withColors, $withTimestamps, $cli);
 
     $hadArgv = array_key_exists('argv', $GLOBALS);
     $previousArgv = $hadArgv ? $GLOBALS['argv'] : null;
@@ -49,7 +49,9 @@ function dispatch(
             $stderrProp->setValue($cli, $stderr);
             $ownsStdout->setValue($cli, false);
             $ownsStderr->setValue($cli, false);
-            $supportsColors->setValue($cli, false);
+            $isInteractive->setValue($cli, false);
+            $withColors->setValue($cli, false);
+            $withTimestamps->setValue($cli, true);
 
             $exitCode = $cli->dispatch($command, $arguments);
         }
@@ -66,7 +68,7 @@ function dispatch(
         if (is_resource($stdout)) fclose($stdout);
         if (is_resource($stderr)) fclose($stderr);
 
-        restore($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors, $snapshot, $cli);
+        restore($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isInteractive, $withColors, $withTimestamps, $snapshot, $cli);
 
         if ($hadArgv) {
             $GLOBALS['argv'] = $previousArgv;
@@ -85,8 +87,8 @@ function silence(callable $callback): array
 {
     $console = Console::instance();
 
-    [$stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors] = statics();
-    $snapshot = snapshot($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors, $console);
+    [$stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isTTY, $withColors, $withTimestamps] = statics();
+    $snapshot = snapshot($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isTTY, $withColors, $withTimestamps, $console);
 
     $stdout = fopen('php://temp', 'w+');
     $stderr = fopen('php://temp', 'w+');
@@ -95,19 +97,21 @@ function silence(callable $callback): array
     $stderrProp->setValue($console, $stderr);
     $ownsStdout->setValue($console, false);
     $ownsStderr->setValue($console, false);
-    $supportsColors->setValue($console, false);
+    $isTTY->setValue($console, false);
+    $withColors->setValue($console, false);
+    $withTimestamps->setValue($console, true);
 
     try {
         $callback();
     } finally {
-        restore($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $supportsColors, $snapshot, $console);
+        restore($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isTTY, $withColors, $withTimestamps, $snapshot, $console);
     }
 
     return readAndClose([$stdout, $stderr]);
 }
 
 /**
- * @return array{0:\ReflectionProperty,1:\ReflectionProperty,2:\ReflectionProperty,3:\ReflectionProperty,4:\ReflectionProperty}
+ * @return array{0:\ReflectionProperty,1:\ReflectionProperty,2:\ReflectionProperty,3:\ReflectionProperty,4:\ReflectionProperty,5:\ReflectionProperty,6:\ReflectionProperty}
  */
 function statics(): array
 {
@@ -117,9 +121,11 @@ function statics(): array
     $stderr = $reflection->getProperty('stderr'); $stderr->setAccessible(true);
     $ownsStdout = $reflection->getProperty('ownsStdout'); $ownsStdout->setAccessible(true);
     $ownsStderr = $reflection->getProperty('ownsStderr'); $ownsStderr->setAccessible(true);
-    $supports = $reflection->getProperty('supportsColors'); $supports->setAccessible(true);
+    $isInteractive = $reflection->getProperty('isInteractive'); $isInteractive->setAccessible(true);
+    $withColors = $reflection->getProperty('withColors'); $withColors->setAccessible(true);
+    $withTimestamps = $reflection->getProperty('withTimestamps'); $withTimestamps->setAccessible(true);
 
-    return [$stdout, $stderr, $ownsStdout, $ownsStderr, $supports];
+    return [$stdout, $stderr, $ownsStdout, $ownsStderr, $isInteractive, $withColors, $withTimestamps];
 }
 
 /**
@@ -131,7 +137,9 @@ function snapshot(
     \ReflectionProperty $stderr,
     \ReflectionProperty $ownsStdout,
     \ReflectionProperty $ownsStderr,
-    \ReflectionProperty $supports,
+    \ReflectionProperty $isTTY,
+    \ReflectionProperty $withColors,
+    \ReflectionProperty $withTimestamps,
     CoreConsole $console
 ): array {
     return [
@@ -139,19 +147,23 @@ function snapshot(
         'stderr' => $stderr->getValue($console),
         'ownsStdout' => $ownsStdout->getValue($console),
         'ownsStderr' => $ownsStderr->getValue($console),
-        'supports' => $supports->getValue($console),
+        'isTTY' => $isTTY->getValue($console),
+        'withColors' => $withColors->getValue($console),
+        'withTimestamps' => $withTimestamps->getValue($console),
     ];
 }
 
 /**
- * @param array{stdout:mixed,stderr:mixed,ownsStdout:mixed,ownsStderr:mixed,supports:mixed} $snapshot
+ * @param array{stdout:mixed,stderr:mixed,ownsStdout:mixed,ownsStderr:mixed,isTTY:mixed,withColors:mixed,withTimestamps:mixed} $snapshot
  */
 function restore(
     \ReflectionProperty $stdout,
     \ReflectionProperty $stderr,
     \ReflectionProperty $ownsStdout,
     \ReflectionProperty $ownsStderr,
-    \ReflectionProperty $supports,
+    \ReflectionProperty $isTTY,
+    \ReflectionProperty $withColors,
+    \ReflectionProperty $withTimestamps,
     array $snapshot,
     CoreConsole $console
 ): void {
@@ -159,7 +171,9 @@ function restore(
     $stderr->setValue($console, $snapshot['stderr']);
     $ownsStdout->setValue($console, $snapshot['ownsStdout']);
     $ownsStderr->setValue($console, $snapshot['ownsStderr']);
-    $supports->setValue($console, $snapshot['supports']);
+    $isTTY->setValue($console, $snapshot['isTTY']);
+    $withColors->setValue($console, $snapshot['withColors']);
+    $withTimestamps->setValue($console, $snapshot['withTimestamps']);
 }
 
 /**

@@ -1,0 +1,2 @@
+- hacer que silence devuelva también el valor de retorno del handler, para no tener que estar inspeccionando la salida estándar.
+- en los jobs de cada minuto, se considera que se ejecute en el segundo 0, entonces el collect puede hacer que nunca lo ejecute ya que podemos caer en cualquier segundo. hay que ver si esto pasa en realidad con la implementacion y hacer lo que hace laravel en tal caso que lo deja ejecutandose por un tiempito al collect
