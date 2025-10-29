@@ -7,10 +7,10 @@ namespace Ajo\Tests\Stress;
 use Ajo\Test;
 use PDO;
 
-// Force autoload Job2
-class_exists(\Ajo\Core\Job2::class);
+// Force autoload Job
+class_exists(\Ajo\JobCore::class);
 
-use Ajo\Core\Job2;
+use Ajo\JobCore as Job;
 
 // ============================================================================
 // Test Database Helper
@@ -19,8 +19,14 @@ use Ajo\Core\Job2;
 function createTestPDO(): PDO
 {
     static $pdo = null;
+    static $pid = null;
+    $currentPid = getmypid();
 
-    if ($pdo !== null) {
+    if ($pid !== $currentPid) {
+        $pdo = null;
+    }
+
+    if ($pdo !== null && $pid === $currentPid) {
         try {
             $pdo->query('SELECT 1');
         } catch (\PDOException) {
@@ -38,6 +44,7 @@ function createTestPDO(): PDO
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             ]
         );
+        $pid = $currentPid;
     }
 
     return $pdo;
@@ -46,8 +53,11 @@ function createTestPDO(): PDO
 function getTestTableName(): string
 {
     static $tableName = null;
-    if ($tableName === null) {
-        $tableName = 'jobs_test_' . getmypid();
+    static $pid = null;
+    $currentPid = getmypid();
+    if ($tableName === null || $pid !== $currentPid) {
+        $pid = $currentPid;
+        $tableName = 'jobs_test_' . $currentPid;
     }
     return $tableName;
 }
@@ -62,13 +72,13 @@ function cleanJobsTable(PDO $pdo, ?string $tableName = null): void
     }
 }
 
-Test::describe('Job2 Stress Tests', function () {
+Test::suite('Job Stress Tests', function () {
 
     Test::beforeEach(function ($state) {
         // Always get fresh PDO to avoid "MySQL server has gone away"
         $state['pdo'] = createTestPDO();
         cleanJobsTable($state['pdo']);
-        $state['job'] = new Job2($state['pdo'], null, getTestTableName());
+        $state['job'] = new Job($state['pdo'], null, getTestTableName());
         $state['job']->install();
     });
 
@@ -86,7 +96,7 @@ Test::describe('Job2 Stress Tests', function () {
     // Performance Tests
     // ========================================================================
 
-    Test::it('selects 1000 jobs under 500ms with proper index usage', function ($state) {
+    Test::case('selects 1000 jobs under 500ms with proper index usage', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -144,7 +154,7 @@ Test::describe('Job2 Stress Tests', function () {
         Test::assertTrue($usesKey, "Query should consider available indexes");
     });
 
-    Test::it('keeps memory under 50MB when processing 5000 jobs', function ($state) {
+    Test::case('keeps memory under 50MB when processing 5000 jobs', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -175,7 +185,7 @@ Test::describe('Job2 Stress Tests', function () {
         Test::assertEquals(0, $remaining, "All jobs should be processed");
     });
 
-    Test::it('achieves 100+ executions per second with single worker', function ($state) {
+    Test::case('achieves 100+ executions per second with single worker', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -216,7 +226,7 @@ Test::describe('Job2 Stress Tests', function () {
             "Throughput: " . round($throughput, 1) . " jobs/sec (expected >= 20/sec)");
     });
 
-    Test::it('scales throughput linearly from 5 to 10 workers (pcntl)', function ($state) {
+    Test::case('scales throughput linearly from 5 to 10 workers (pcntl)', function ($state) {
         if (!function_exists('pcntl_fork')) {
             Test::assertTrue(true, "Skipped: pcntl extension not available");
             return;
@@ -256,7 +266,7 @@ Test::describe('Job2 Stress Tests', function () {
         Test::assertTrue(true, "Worker scaling test completed");
     });
 
-    Test::it('handles high contention on single job with fairness', function ($state) {
+    Test::case('handles high contention on single job with fairness', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -303,7 +313,7 @@ Test::describe('Job2 Stress Tests', function () {
         Test::assertEquals(0, $remaining, "No jobs should remain after processing");
     });
 
-    Test::it('named locks enforce concurrency limit across parallel batches', function ($state) {
+    Test::case('named locks enforce concurrency limit across parallel batches', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 

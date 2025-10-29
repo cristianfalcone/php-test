@@ -7,17 +7,62 @@ namespace Ajo;
 use PDO;
 use PDOException;
 use RuntimeException;
+use Throwable;
 
 final class Database
 {
     private static ?PDO $pdo = null;
+    private static ?int $pid = null;
+    private static bool $provided = false;
 
     public static function get(): PDO
     {
+        $pid = getmypid();
+
         if (self::$pdo instanceof PDO) {
-            return self::$pdo;
+            if (self::$pid !== $pid) {
+                self::disconnect();
+            } elseif (self::$provided || self::ping(self::$pdo)) {
+                return self::$pdo;
+            } else {
+                self::disconnect();
+            }
         }
 
+        self::$pdo = self::connect();
+        self::$pid = $pid;
+        self::$provided = false;
+
+        return self::$pdo;
+    }
+
+    public static function set(PDO $pdo): void
+    {
+        self::$pdo = $pdo;
+        self::$pid = getmypid();
+        self::$provided = true;
+    }
+
+    public static function disconnect(): void
+    {
+        self::$pdo = null;
+        self::$pid = null;
+        self::$provided = false;
+    }
+
+    private static function env(string $key, ?string $default = null): string
+    {
+        $value = getenv($key);
+
+        if ($value === false || $value === null) {
+            return $default ?? '';
+        }
+
+        return (string)$value;
+    }
+
+    private static function connect(): PDO
+    {
         $host = self::env('DB_HOST', 'db');
         $port = (string)self::env('DB_PORT', '3306');
         $database = self::env('DB_DATABASE', 'app');
@@ -38,32 +83,19 @@ final class Database
         ];
 
         try {
-            self::$pdo = new PDO($dsn, $user, $password, $options);
+            return new PDO($dsn, $user, $password, $options);
         } catch (PDOException $e) {
             throw new RuntimeException($e->getMessage(), 0, $e);
         }
-
-        return self::$pdo;
     }
 
-    public static function set(PDO $pdo): void
+    private static function ping(PDO $pdo): bool
     {
-        self::$pdo = $pdo;
-    }
-
-    public static function disconnect(): void
-    {
-        self::$pdo = null;
-    }
-
-    private static function env(string $key, ?string $default = null): string
-    {
-        $value = getenv($key);
-
-        if ($value === false || $value === null) {
-            return $default ?? '';
+        try {
+            $pdo->query('SELECT 1');
+            return true;
+        } catch (Throwable) {
+            return false;
         }
-
-        return (string)$value;
     }
 }

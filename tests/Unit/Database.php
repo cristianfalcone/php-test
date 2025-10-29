@@ -27,7 +27,7 @@ Test::suite('Database', function () {
         Database::disconnect();
     });
 
-    Test::it('should return previously set connection', function () {
+    Test::case('returns previously set connection', function () {
         $pdo = new FakePDO();
 
         Database::set($pdo);
@@ -35,7 +35,7 @@ Test::suite('Database', function () {
         Test::assertSame($pdo, Database::get());
     });
 
-    Test::it('should clear cached instance', function () {
+    Test::case('clears cached instance', function () {
         $first = new FakePDO();
         $second = new FakePDO();
 
@@ -46,7 +46,7 @@ Test::suite('Database', function () {
         Test::assertSame($second, Database::get());
     });
 
-    Test::it('should fail when configuration is incomplete', function () {
+    Test::case('fails when configuration is incomplete', function () {
         setEnv([
             'DB_DATABASE' => '',
             'DB_USER' => '',
@@ -59,7 +59,7 @@ Test::suite('Database', function () {
         });
     });
 
-    Test::it('should wrap pdo exception into runtime exception', function () {
+    Test::case('wraps pdo exception into runtime exception', function () {
         
         setEnv([
             'DB_HOST' => 'invalid-host',

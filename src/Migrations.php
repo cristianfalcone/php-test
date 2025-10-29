@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Ajo;
 
-use Ajo\Core\Console as CoreConsole;
 use PDO;
 use RuntimeException;
 use Throwable;
@@ -15,10 +14,12 @@ use Throwable;
 final class Migrations
 {
     private string $path;
+    private string $table;
 
-    private function __construct(string $path)
+    private function __construct(string $path, string $table = 'migrations')
     {
         $this->path = rtrim($path, '/');
+        $this->table = $table;
 
         if (!is_dir($this->path)) {
             mkdir($this->path, 0o755, true);
@@ -28,9 +29,9 @@ final class Migrations
     /**
      * Registers migration commands in the console.
      */
-    public static function register(CoreConsole $cli, string $path)
+    public static function register(ConsoleCore $cli, string $path, string $table = 'migrations')
     {
-        $self = new self($path);
+        $self = new self($path, $table);
 
         $cli->command('migrate',          fn() => $self->migrate())->describe('Runs all pending migrations.');
         $cli->command('migrate:status',   fn() => $self->status())->describe('Shows the current status of migrations.');
@@ -51,7 +52,7 @@ final class Migrations
         $pending = $this->pending();
 
         if ($pending === []) {
-            Console::log('No pending migrations.');
+            Console::line('No pending migrations.');
             return 0;
         }
 
@@ -86,7 +87,7 @@ final class Migrations
                     : 'Could not execute migrations.';
 
                 Console::error($message);
-                Console::log('Failed on: ' . $migration);
+                Console::line('Failed on: ' . $migration);
 
                 return 1;
             }
@@ -95,7 +96,7 @@ final class Migrations
         Console::success(sprintf('Migrations applied. Batch %d, %d entries processed.', $batch, count($migrated)));
 
         foreach ($migrated as $migration) {
-            Console::log('  - ' . $migration);
+            Console::line('  - ' . $migration);
         }
 
         return 0;
@@ -124,7 +125,7 @@ final class Migrations
             ];
         }
 
-        Console::log(sprintf(
+        Console::line(sprintf(
             'Total: %d | Applied: %d | Pending: %d',
             count($rows),
             count($applied),
@@ -145,7 +146,7 @@ final class Migrations
         $latest = $this->last();
 
         if ($latest === []) {
-            Console::log('No migrations to revert.');
+            Console::line('No migrations to revert.');
             return 0;
         }
 
@@ -166,7 +167,7 @@ final class Migrations
         Console::success(sprintf('Migrations reverted. Processed: %d.', count($rolled)));
 
         foreach ($rolled as $name) {
-            Console::log('  - ' . $name);
+            Console::line('  - ' . $name);
         }
 
         return 0;
@@ -199,14 +200,14 @@ final class Migrations
         }
 
         if ($rolled === []) {
-            Console::log('No migrations to reset.');
+            Console::line('No migrations to reset.');
             return 0;
         }
 
         Console::success(sprintf('Migrations reset. Processed: %d.', count($rolled)));
 
         foreach ($rolled as $name) {
-            Console::log('  - ' . $name);
+            Console::line('  - ' . $name);
         }
 
         return 0;
@@ -228,7 +229,8 @@ final class Migrations
     {
         $this->ensure();
 
-        $sql = 'SELECT COUNT(*) FROM migrations';
+        $table = $this->table;
+        $sql = "SELECT COUNT(*) FROM `{$table}`";
         $statement = $this->pdo()->prepare($sql);
 
         if ($statement === false) {
@@ -239,7 +241,7 @@ final class Migrations
         $count = (int)$statement->fetchColumn();
 
         if ($count > 0) {
-            Console::log('Migration table is already initialized.');
+            Console::line('Migration table is already initialized.');
             return 0;
         }
 
@@ -301,7 +303,7 @@ PHP;
         }
 
         Console::success(sprintf('Migration created: %s', $name));
-        Console::log('Edit the file to define schema changes.');
+        Console::line('Edit the file to define schema changes.');
 
         return 0;
     }
@@ -312,7 +314,7 @@ PHP;
     private function render(array $rows)
     {
         if ($rows === []) {
-            Console::log('No defined migrations.');
+            Console::line('No defined migrations.');
             return;
         }
 
@@ -353,7 +355,7 @@ PHP;
     {
         if ($file === null) {
             Console::error($failure);
-            Console::log('Failed on: ' . $name);
+            Console::line('Failed on: ' . $name);
             return false;
         }
 
@@ -381,7 +383,7 @@ PHP;
             }
 
             Console::error($message);
-            Console::log('Failed on: ' . $name);
+            Console::line('Failed on: ' . $name);
 
             return false;
         }
@@ -396,8 +398,9 @@ PHP;
 
     private function ensure()
     {
+        $table = $this->table;
         $this->pdo()->exec("
-            CREATE TABLE IF NOT EXISTS migrations (
+            CREATE TABLE IF NOT EXISTS `{$table}` (
                 migration VARCHAR(255) PRIMARY KEY,
                 batch INTEGER NOT NULL,
                 ran_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -423,7 +426,8 @@ PHP;
 
     private function applied()
     {
-        $sql = 'SELECT migration, batch, ran_at FROM migrations ORDER BY batch ASC, migration ASC';
+        $table = $this->table;
+        $sql = "SELECT migration, batch, ran_at FROM `{$table}` ORDER BY batch ASC, migration ASC";
         $statement = $this->pdo()->query($sql);
 
         if ($statement === false) {
@@ -438,7 +442,8 @@ PHP;
 
     private function next()
     {
-        $sql = 'SELECT MAX(batch) FROM migrations';
+        $table = $this->table;
+        $sql = "SELECT MAX(batch) FROM `{$table}`";
         $statement = $this->pdo()->query($sql);
 
         if ($statement === false) {
@@ -460,7 +465,8 @@ PHP;
 
     private function record(string $name, int $batch)
     {
-        $sql = 'INSERT INTO migrations (migration, batch) VALUES (:migration, :batch)';
+        $table = $this->table;
+        $sql = "INSERT INTO `{$table}` (migration, batch) VALUES (:migration, :batch)";
         $statement = $this->pdo()->prepare($sql);
 
         if ($statement === false) {
@@ -475,7 +481,8 @@ PHP;
 
     private function last()
     {
-        $sql = 'SELECT MAX(batch) FROM migrations';
+        $table = $this->table;
+        $sql = "SELECT MAX(batch) FROM `{$table}`";
         $statement = $this->pdo()->query($sql);
 
         if ($statement === false) {
@@ -488,7 +495,7 @@ PHP;
             return [];
         }
 
-        $sql = 'SELECT migration, batch, ran_at FROM migrations WHERE batch = :batch ORDER BY migration DESC';
+        $sql = "SELECT migration, batch, ran_at FROM `{$table}` WHERE batch = :batch ORDER BY migration DESC";
         $statement = $this->pdo()->prepare($sql);
 
         if ($statement === false) {
@@ -505,7 +512,8 @@ PHP;
 
     private function remove(string $name)
     {
-        $sql = 'DELETE FROM migrations WHERE migration = :migration';
+        $table = $this->table;
+        $sql = "DELETE FROM `{$table}` WHERE migration = :migration";
         $statement = $this->pdo()->prepare($sql);
 
         if ($statement === false) {

@@ -6,6 +6,7 @@ namespace Ajo\Tests\Unit;
 
 use Ajo\Console;
 use Ajo\Container;
+use Ajo\Database;
 use Ajo\Migrations;
 use Ajo\Test;
 use FilesystemIterator;
@@ -21,9 +22,47 @@ Test::suite('Migrations', function () {
         Container::clear();
         $state['paths'] = [];
         $state['sequence'] = 0;
+        // Use PID to ensure unique table prefix across parallel processes
+        $state['pid'] = getmypid();
+        $state['tables'] = [];
     });
 
     Test::afterEach(function ($state) {
+
+        // Clean up test tables from MySQL BEFORE clearing container
+        if (Container::has('db')) {
+            try {
+                $pdo = Container::get('db');
+                $pid = $state['pid'];
+
+                // Get all tables for this process
+                $stmt = $pdo->query(
+                    "SELECT TABLE_NAME FROM information_schema.TABLES " .
+                    "WHERE TABLE_SCHEMA = DATABASE() " .
+                    "AND TABLE_NAME LIKE '%_{$pid}_%'"
+                );
+                $tables = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+                // Also include the migrations table for this process
+                $migrationsTable = "migrations_{$pid}";
+                $stmt = $pdo->query(
+                    "SELECT TABLE_NAME FROM information_schema.TABLES " .
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{$migrationsTable}'"
+                );
+                if ($stmt->fetchColumn()) {
+                    $tables[] = $migrationsTable;
+                }
+
+                // Drop all test tables for this process
+                $pdo->exec("SET FOREIGN_KEY_CHECKS = 0");
+                foreach ($tables as $table) {
+                    $pdo->exec("DROP TABLE IF EXISTS `{$table}`");
+                }
+                $pdo->exec("SET FOREIGN_KEY_CHECKS = 1");
+            } catch (\Throwable) {
+                // Ignore cleanup errors
+            }
+        }
 
         Container::clear();
 
@@ -34,7 +73,7 @@ Test::suite('Migrations', function () {
         $state['paths'] = [];
     });
 
-    Test::it('should add migration commands on register', function ($state) {
+    Test::case('adds migration commands on register', function ($state) {
 
         $path = newMigrationsPath($state);
         $console = Console::create();
@@ -59,7 +98,7 @@ Test::suite('Migrations', function () {
         }
     });
 
-    Test::it('should execute pending migrations on migrate', function ($state) {
+    Test::case('executes pending migrations on migrate', function ($state) {
 
         [$path, $console, $pdo] = bootstrap($state);
 
@@ -67,19 +106,19 @@ Test::suite('Migrations', function () {
             $state,
             $path,
             'create_sample',
-            "\$pdo->exec('CREATE TABLE sample (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');",
-            "\$pdo->exec('DROP TABLE sample');",
+            "\$pdo->exec(\"CREATE TABLE test_{\$pid}_sample (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL) ENGINE=InnoDB\");",
+            "\$pdo->exec(\"DROP TABLE test_{\$pid}_sample\");",
         );
 
         [$stdout, $stderr] = runOk($console, 'migrate');
         Test::assertStringContainsString('Migrations applied', $stdout);
         Test::assertStringContainsString($sample, $stdout);
 
-        assertTableExists($pdo, 'sample', true);
-        Test::assertContains($sample, applied($pdo));
+        assertTableExists($pdo, testTable($state, 'sample'), true);
+        Test::assertContains($sample, applied($pdo, $state['pid']));
     });
 
-    Test::it('should stop on exception and roll back on migrate', function ($state) {
+    Test::case('stops on exception and rolls back on migrate', function ($state) {
 
         [$path, $console, $pdo] = bootstrap($state);
 
@@ -95,13 +134,14 @@ Test::suite('Migrations', function () {
         Test::assertStringContainsString('Intentional failure', $stderr);
         Test::assertStringContainsString('Failed on: ' . $failing, $stdout);
 
-        $count = $pdo->query('SELECT COUNT(*) FROM migrations WHERE migration = ' . $pdo->quote($failing));
+        $table = 'migrations_' . $state['pid'];
+        $count = $pdo->query("SELECT COUNT(*) FROM `{$table}` WHERE migration = " . $pdo->quote($failing));
         Test::assertNotFalse($count);
         Test::assertSame(0, (int)($count->fetchColumn() ?: 0));
         $count->closeCursor();
     });
 
-    Test::it('should revert latest batch on rollback', function ($state) {
+    Test::case('reverts latest batch on rollback', function ($state) {
 
         [$path, $console, $pdo] = bootstrap($state);
 
@@ -109,27 +149,28 @@ Test::suite('Migrations', function () {
             $state,
             $path,
             'create_items',
-            "\$pdo->exec('CREATE TABLE items (id INTEGER PRIMARY KEY, title TEXT NOT NULL)');",
-            "\$pdo->exec('DROP TABLE items');",
+            "\$pdo->exec(\"CREATE TABLE test_{\$pid}_items (id BIGINT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(255) NOT NULL) ENGINE=InnoDB\");",
+            "\$pdo->exec(\"DROP TABLE test_{\$pid}_items\");",
         );
 
         runOk($console, 'migrate');
 
-        assertTableExists($pdo, 'items', true);
+        assertTableExists($pdo, testTable($state, 'items'), true);
 
         [$stdout, $stderr] = runOk($console, 'migrate:rollback');
         Test::assertStringContainsString('Migrations reverted', $stdout);
         Test::assertStringContainsString($itemsMigration, $stdout);
 
-        $remaining = $pdo->query('SELECT COUNT(*) FROM migrations WHERE migration = ' . $pdo->quote($itemsMigration));
+        $table = 'migrations_' . $state['pid'];
+        $remaining = $pdo->query("SELECT COUNT(*) FROM `{$table}` WHERE migration = " . $pdo->quote($itemsMigration));
         Test::assertNotFalse($remaining);
         Test::assertSame(0, (int)$remaining->fetchColumn());
         $remaining->closeCursor();
 
-        assertTableExists($pdo, 'items', false);
+        assertTableExists($pdo, testTable($state, 'items'), false);
     });
 
-    Test::it('should report when no migrations defined in status', function ($state) {
+    Test::case('reports when no migrations defined in status', function ($state) {
 
         [, $console] = bootstrap($state);
 
@@ -138,7 +179,7 @@ Test::suite('Migrations', function () {
         Test::assertStringContainsString('No defined migrations.', $stdout);
     });
 
-    Test::it('should show applied and pending migrations', function ($state) {
+    Test::case('shows applied and pending migrations', function ($state) {
 
         [$path, $console] = bootstrap($state);
 
@@ -146,8 +187,8 @@ Test::suite('Migrations', function () {
             $state,
             $path,
             'create_alphas',
-            "\$pdo->exec('CREATE TABLE alphas (id INTEGER PRIMARY KEY)');",
-            "\$pdo->exec('DROP TABLE alphas');",
+            "\$pdo->exec(\"CREATE TABLE test_{\$pid}_alphas (id BIGINT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB\");",
+            "\$pdo->exec(\"DROP TABLE test_{\$pid}_alphas\");",
         );
 
         runOk($console, 'migrate');
@@ -156,8 +197,8 @@ Test::suite('Migrations', function () {
             $state,
             $path,
             'create_betas',
-            "\$pdo->exec('CREATE TABLE betas (id INTEGER PRIMARY KEY)');",
-            "\$pdo->exec('DROP TABLE betas');",
+            "\$pdo->exec(\"CREATE TABLE test_{\$pid}_betas (id BIGINT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB\");",
+            "\$pdo->exec(\"DROP TABLE test_{\$pid}_betas\");",
         );
 
         [$stdout, $stderr] = runOk($console, 'migrate:status');
@@ -169,20 +210,21 @@ Test::suite('Migrations', function () {
         Test::assertStringContainsString('no', $stdout);
     });
 
-    Test::it('should create bootstrap record on install', function ($state) {
+    Test::case('creates bootstrap record on install', function ($state) {
 
         [, $console, $pdo] = bootstrap($state);
 
         [$stdout] = runOk($console, 'migrate:install');
         Test::assertStringContainsString('Migration registry initialized.', $stdout);
 
-        $count = $pdo->query("SELECT COUNT(*) FROM migrations WHERE migration = 'bootstrap'");
+        $table = 'migrations_' . $state['pid'];
+        $count = $pdo->query("SELECT COUNT(*) FROM `{$table}` WHERE migration = 'bootstrap'");
         Test::assertNotFalse($count);
         Test::assertSame(1, (int)$count->fetchColumn());
         $count->closeCursor();
     });
 
-    Test::it('should not duplicate bootstrap', function ($state) {
+    Test::case('does not duplicate bootstrap', function ($state) {
 
         [, $console, $pdo] = bootstrap($state);
 
@@ -190,24 +232,25 @@ Test::suite('Migrations', function () {
         [$stdout] = runOk($console, 'migrate:install');
         Test::assertStringContainsString('Migration table is already initialized.', $stdout);
 
-        $count = $pdo->query("SELECT COUNT(*) FROM migrations WHERE migration = 'bootstrap'");
+        $table = 'migrations_' . $state['pid'];
+        $count = $pdo->query("SELECT COUNT(*) FROM `{$table}` WHERE migration = 'bootstrap'");
         Test::assertNotFalse($count);
         Test::assertSame(1, (int)$count->fetchColumn());
         $count->closeCursor();
     });
 
-    Test::it('should revert all migrations on reset', function ($state) {
+    Test::case('reverts all migrations on reset', function ($state) {
 
         [$path, $console, $pdo] = bootstrap($state);
 
         createMigrations($state, $path, [
             'create_alpha' => [
-                'up' => "\$pdo->exec('CREATE TABLE alpha (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');",
-                'down' => "\$pdo->exec('DROP TABLE alpha');",
+                'up' => "\$pdo->exec(\"CREATE TABLE test_{\$pid}_alpha (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL) ENGINE=InnoDB\");",
+                'down' => "\$pdo->exec(\"DROP TABLE test_{\$pid}_alpha\");",
             ],
             'create_beta' => [
-                'up' => "\$pdo->exec('CREATE TABLE beta (id INTEGER PRIMARY KEY, label TEXT NOT NULL)');",
-                'down' => "\$pdo->exec('DROP TABLE beta');",
+                'up' => "\$pdo->exec(\"CREATE TABLE test_{\$pid}_beta (id BIGINT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(255) NOT NULL) ENGINE=InnoDB\");",
+                'down' => "\$pdo->exec(\"DROP TABLE test_{\$pid}_beta\");",
             ],
         ]);
 
@@ -216,14 +259,14 @@ Test::suite('Migrations', function () {
         [$stdout] = runOk($console, 'migrate:reset');
         Test::assertStringContainsString('Migrations reset', $stdout);
 
-        assertTableExists($pdo, 'alpha', false);
-        assertTableExists($pdo, 'beta', false);
+        assertTableExists($pdo, testTable($state, 'alpha'), false);
+        assertTableExists($pdo, testTable($state, 'beta'), false);
 
-        $remaining = array_diff(applied($pdo), ['bootstrap']);
+        $remaining = array_diff(applied($pdo, $state['pid']), ['bootstrap']);
         Test::assertSame([], $remaining);
     });
 
-    Test::it('should reset and migrate again on fresh', function ($state) {
+    Test::case('resets and migrates again on fresh', function ($state) {
 
         [$path, $console, $pdo] = bootstrap($state);
 
@@ -231,27 +274,29 @@ Test::suite('Migrations', function () {
             $state,
             $path,
             'create_items',
-            "\$pdo->exec('CREATE TABLE items (id INTEGER PRIMARY KEY, title TEXT NOT NULL)');",
-            "\$pdo->exec('DROP TABLE items');",
+            "\$pdo->exec(\"CREATE TABLE test_{\$pid}_items (id BIGINT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(255) NOT NULL) ENGINE=InnoDB\");",
+            "\$pdo->exec(\"DROP TABLE test_{\$pid}_items\");",
         );
 
         runOk($console, 'migrate');
 
-        $pdo->exec("INSERT INTO items (title) VALUES ('uno')");
+        $tableName = testTable($state, 'items');
+        $pdo->exec("INSERT INTO `{$tableName}` (title) VALUES ('uno')");
 
         [$stdout] = runOk($console, 'migrate:fresh');
         Test::assertStringContainsString('Migrations reset', $stdout);
         Test::assertStringContainsString('Migrations applied', $stdout);
 
-        $count = $pdo->query('SELECT COUNT(*) FROM items');
+        $tableName = testTable($state, 'items');
+        $count = $pdo->query("SELECT COUNT(*) FROM `{$tableName}`");
         Test::assertNotFalse($count);
         Test::assertSame(0, (int)$count->fetchColumn());
         $count->closeCursor();
 
-        Test::assertContains($itemsMigration, applied($pdo));
+        Test::assertContains($itemsMigration, applied($pdo, $state['pid']));
     });
 
-    Test::it('should roll back last batch and reapply it on refresh', function ($state) {
+    Test::case('rolls back last batch and reapplies it on refresh', function ($state) {
 
         [$path, $console, $pdo] = bootstrap($state);
 
@@ -259,43 +304,47 @@ Test::suite('Migrations', function () {
             $state,
             $path,
             'create_alphas',
-            "\$pdo->exec('CREATE TABLE alphas (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');",
-            "\$pdo->exec('DROP TABLE alphas');",
+            "\$pdo->exec(\"CREATE TABLE test_{\$pid}_alphas (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL) ENGINE=InnoDB\");",
+            "\$pdo->exec(\"DROP TABLE test_{\$pid}_alphas\");",
         );
 
         runOk($console, 'migrate'); // batch 1: alphas
-        $pdo->exec("INSERT INTO alphas (name) VALUES ('persistente')");
+        $alphasTable = testTable($state, 'alphas');
+        $pdo->exec("INSERT INTO `{$alphasTable}` (name) VALUES ('persistente')");
 
         $betaName = createMigration(
             $state,
             $path,
             'create_betas',
-            "\$pdo->exec('CREATE TABLE betas (id INTEGER PRIMARY KEY, code TEXT NOT NULL)');",
-            "\$pdo->exec('DROP TABLE betas');",
+            "\$pdo->exec(\"CREATE TABLE test_{\$pid}_betas (id BIGINT AUTO_INCREMENT PRIMARY KEY, code VARCHAR(255) NOT NULL) ENGINE=InnoDB\");",
+            "\$pdo->exec(\"DROP TABLE test_{\$pid}_betas\");",
         );
 
         runOk($console, 'migrate'); // batch 2: betas
-        $pdo->exec("INSERT INTO betas (code) VALUES ('temporal')");
+        $betasTable = testTable($state, 'betas');
+        $pdo->exec("INSERT INTO `{$betasTable}` (code) VALUES ('temporal')");
 
         [$stdout] = runOk($console, 'migrate:refresh');
         Test::assertStringContainsString('Migrations reverted', $stdout);
         Test::assertStringContainsString('Migrations applied', $stdout);
 
-        $alphas = $pdo->query('SELECT name FROM alphas');
+        $alphasTable = testTable($state, 'alphas');
+        $alphas = $pdo->query("SELECT name FROM `{$alphasTable}`");
         Test::assertNotFalse($alphas);
         Test::assertSame(['persistente'], $alphas->fetchAll(PDO::FETCH_COLUMN));
         $alphas->closeCursor();
 
-        $betas = $pdo->query('SELECT code FROM betas');
+        $betasTable = testTable($state, 'betas');
+        $betas = $pdo->query("SELECT code FROM `{$betasTable}`");
         Test::assertNotFalse($betas);
         Test::assertSame([], $betas->fetchAll(PDO::FETCH_COLUMN));
         $betas->closeCursor();
 
-        Test::assertContains($alphaName, applied($pdo));
-        Test::assertContains($betaName, applied($pdo));
+        Test::assertContains($alphaName, applied($pdo, $state['pid']));
+        Test::assertContains($betaName, applied($pdo, $state['pid']));
     });
 
-    Test::it('should create directory when missing', function ($state) {
+    Test::case('creates directory when missing', function ($state) {
 
         $path = sys_get_temp_dir() . '/migrations_new_' . uniqid('', true);
         $state['paths'][] = $path;
@@ -308,19 +357,19 @@ Test::suite('Migrations', function () {
         Test::assertTrue(is_dir($path));
     });
 
-    Test::it('should report when no pending migrations on migrate', function ($state) {
+    Test::case('reports when no pending migrations on migrate', function ($state) {
         [, $console] = bootstrap($state);
         [$stdout] = runOk($console, 'migrate');
         Test::assertStringContainsString('No pending migrations.', $stdout);
     });
 
-    Test::it('should report when nothing to revert on rollback', function ($state) {
+    Test::case('reports when nothing to revert on rollback', function ($state) {
         [, $console] = bootstrap($state);
         [$stdout] = runOk($console, 'migrate:rollback');
         Test::assertStringContainsString('No migrations to revert.', $stdout);
     });
 
-    Test::it('should fail when migration file is missing', function ($state) {
+    Test::case('fails when migration file is missing', function ($state) {
 
         [$path, $console] = bootstrap($state);
 
@@ -328,8 +377,8 @@ Test::suite('Migrations', function () {
             $state,
             $path,
             'create_missing',
-            "\$pdo->exec('CREATE TABLE missing (id INTEGER PRIMARY KEY)');",
-            "\$pdo->exec('DROP TABLE missing');",
+            "\$pdo->exec(\"CREATE TABLE test_{\$pid}_missing (id BIGINT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB\");",
+            "\$pdo->exec(\"DROP TABLE test_{\$pid}_missing\");",
         );
 
         runOk($console, 'migrate');
@@ -340,7 +389,7 @@ Test::suite('Migrations', function () {
         Test::assertStringContainsString('Failed on: ' . $name, $stdout);
     });
 
-    Test::it('should fall back to default error message on migrate', function ($state) {
+    Test::case('falls back to default error message on migrate', function ($state) {
 
         [$path, $console] = bootstrap($state);
 
@@ -358,7 +407,7 @@ Test::suite('Migrations', function () {
         Test::assertStringContainsString('Failed on: ' . $broken, $stdout);
     });
 
-    Test::it('should fall back to default error message on rollback', function ($state) {
+    Test::case('falls back to default error message on rollback', function ($state) {
 
         [$path, $console] = bootstrap($state);
 
@@ -377,7 +426,7 @@ Test::suite('Migrations', function () {
         Test::assertStringContainsString('Failed on: ' . $brokenDown, $stdout);
     });
 
-    Test::it('should fail when database is missing', function ($state) {
+    Test::case('fails when database is missing', function ($state) {
 
         Container::clear();
         $path = newMigrationsPath($state);
@@ -436,14 +485,18 @@ function createMigration(
     $name = sprintf('%d_%s_%d', (int)(microtime(true) * 1000), $suffix, ++$state['sequence']);
     $file = $directory . '/' . $name . '.php';
 
+    // Inject PID into migration code to make table names unique per process
+    $pid = $state['pid'];
     $contents = <<<PHP
 <?php
 
 return [
     'up' => function (PDO \$pdo) {
+        \$pid = {$pid};
         $upBody
     },
     'down' => function (PDO \$pdo) {
+        \$pid = {$pid};
         $downBody
     },
 ];
@@ -479,7 +532,10 @@ function createMigrations($state, string $directory, array $definitions): array
 
 function assertTableExists(PDO $pdo, string $table, bool $expected): void
 {
-    $statement = $pdo->query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = " . $pdo->quote($table));
+    $statement = $pdo->query(
+        "SELECT TABLE_NAME FROM information_schema.TABLES " .
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = " . $pdo->quote($table)
+    );
     Test::assertNotFalse($statement);
     $value = $statement->fetchColumn();
     $statement->closeCursor();
@@ -494,9 +550,10 @@ function assertTableExists(PDO $pdo, string $table, bool $expected): void
 /**
  * @return list<string>
  */
-function applied(PDO $pdo): array
+function applied(PDO $pdo, ?int $pid = null): array
 {
-    $statement = $pdo->query('SELECT migration FROM migrations');
+    $table = $pid ? "migrations_{$pid}" : 'migrations';
+    $statement = $pdo->query("SELECT migration FROM `{$table}`");
 
     if ($statement === false) {
         return [];
@@ -539,6 +596,11 @@ function runFail($cli, string $command, array $arguments = []): array
     return [$stdout, $stderr];
 }
 
+function testTable($state, string $name): string
+{
+    return "test_{$state['pid']}_{$name}";
+}
+
 /**
  * @return array{0:string,1:\Ajo\Core\Console,2:PDO}
  */
@@ -547,10 +609,11 @@ function bootstrap($state): array
     $path = newMigrationsPath($state);
     $console = Console::create();
 
-    Migrations::register($console, $path);
+    // Use PID-specific table name for migrations to isolate parallel tests
+    $table = 'migrations_' . $state['pid'];
+    Migrations::register($console, $path, $table);
 
-    $pdo = new PDO('sqlite::memory:');
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo = Database::get();
 
     Container::set('db', $pdo);
 

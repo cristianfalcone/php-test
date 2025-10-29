@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Ajo\Core;
+namespace Ajo;
 
 use Ajo\Tests\Unit\Http\TestHarness;
 
@@ -26,8 +26,8 @@ function header(string $header, bool $replace = true, ?int $response_code = null
 
 namespace Ajo\Tests\Unit\Http;
 
-use Ajo\Core\Http as Root;
-use Ajo\Http;
+use Ajo\HttpCore as Http;
+use Ajo\Http as HttpFacade;
 use Ajo\Test;
 use BadMethodCallException;
 use InvalidArgumentException;
@@ -54,13 +54,13 @@ Test::suite('Http', function () {
         TestHarness::reset();
     });
 
-    Test::it('should return http instance on create', function () {
-        Test::assertInstanceOf(Root::class, Http::create());
+    Test::case('returns http instance on create', function () {
+        Test::assertInstanceOf(Http::class, HttpFacade::create());
     });
 
-    Test::it('should run global middleware before route handler', function () {
+    Test::case('runs global middleware before route handler', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
         $events = [];
 
         $http->use(function () use (&$events) {
@@ -82,9 +82,9 @@ Test::suite('Http', function () {
         Test::assertSame(['ok' => true], $payload);
     });
 
-    Test::it('should run path specific middleware only when prefix matches', function () {
+    Test::case('runs path specific middleware only when prefix matches', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
         $events = [];
 
         $http->use('/api', function () use (&$events) {
@@ -105,9 +105,9 @@ Test::suite('Http', function () {
         Test::assertSame(['ok' => true], decode($secondOutput));
     });
 
-    Test::it('should register handlers for multiple methods', function () {
+    Test::case('registers handlers for multiple methods', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
 
         $http->map(['GET', 'POST'], '/resource', fn() => ['ok' => true]);
 
@@ -119,18 +119,18 @@ Test::suite('Http', function () {
         Test::assertSame(decode($getOutput), decode($postOutput));
     });
 
-    Test::it('should fail when map called without handlers', function () {
+    Test::case('fails when map called without handlers', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
 
         Test::expectException(InvalidArgumentException::class, function () use ($http) {
             $http->map('GET', '/oops');
         });
     });
 
-    Test::it('should register route via dynamic method', function () {
+    Test::case('registers route via dynamic method', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
 
         $http->post('/submit', fn() => ['posted' => true]);
 
@@ -140,18 +140,18 @@ Test::suite('Http', function () {
         Test::assertSame(['posted' => true], decode($output));
     });
 
-    Test::it('should throw when dynamic method uses unsupported verb', function () {
+    Test::case('throws when dynamic method uses unsupported verb', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
 
         Test::expectException(BadMethodCallException::class, function () use ($http) {
             $http->foo('/invalid', fn() => null);
         });
     });
 
-    Test::it('should use default not found handler', function () {
+    Test::case('uses default not found handler', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
 
         [$output, $status] = dispatch($http, 'GET', '/missing');
         $payload = decode($output);
@@ -161,9 +161,9 @@ Test::suite('Http', function () {
         Test::assertSame('not_found', $payload['error']);
     });
 
-    Test::it('should return 204 when handler yields null', function () {
+    Test::case('returns 204 when handler yields null', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
 
         $http->get('/empty', fn() => null);
 
@@ -173,10 +173,10 @@ Test::suite('Http', function () {
         Test::assertSame(204, $status);
     });
 
-    Test::it('should use custom exception handler', function () {
+    Test::case('uses custom exception handler', function () {
 
         $caught = null;
-        $http = new Root(
+        $http = new Http(
             null,
             function (Throwable $throwable) use (&$caught): array {
                 $caught = $throwable;
@@ -197,9 +197,9 @@ Test::suite('Http', function () {
         Test::assertInstanceOf(RuntimeException::class, $caught);
     });
 
-    Test::it('should fall back to get handler', function () {
+    Test::case('falls back to get handler', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
 
         $http->get('/resource', fn() => ['ok' => true]);
 
@@ -209,9 +209,9 @@ Test::suite('Http', function () {
         Test::assertSame(200, $status);
     });
 
-    Test::it('should infer method and target from server globals', function () {
+    Test::case('infers method and target from server globals', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
         $http->get('/auto', fn() => ['auto' => true]);
 
         $backup = $_SERVER;
@@ -233,9 +233,9 @@ Test::suite('Http', function () {
         Test::assertSame(200, TestHarness::$status);
     });
 
-    Test::it('should handle JSON encoding errors', function () {
+    Test::case('handles JSON encoding errors', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
 
         $http->get('/invalid', fn() => ['value' => \NAN]);
 
@@ -246,9 +246,9 @@ Test::suite('Http', function () {
         Test::assertSame(['ok' => false, 'error' => 'encoding_error'], $payload);
     });
 
-    Test::it('should evaluate nested paths in matches', function () {
+    Test::case('evaluates nested paths in matches', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
         $reflection = new \ReflectionClass($http);
         $method = $reflection->getMethod('matches');
         $method->setAccessible(true);
@@ -257,9 +257,9 @@ Test::suite('Http', function () {
         Test::assertFalse($method->invoke($http, '/api', '/status'));
     });
 
-    Test::it('should run for nested path prefixes', function () {
+    Test::case('runs for nested path prefixes', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
         $events = [];
 
         $http->use('/api', function () use (&$events) {
@@ -279,9 +279,9 @@ Test::suite('Http', function () {
         Test::assertSame(['ok' => true], $payload);
     });
 
-    Test::it('should match exact route for path middleware', function () {
+    Test::case('matches exact route for path middleware', function () {
 
-        $http = Http::create();
+        $http = HttpFacade::create();
         $events = [];
 
         $http->use('/status', function () use (&$events) {
@@ -302,7 +302,7 @@ Test::suite('Http', function () {
     });
 });
 
-function dispatch(Root $http, string $method, string $target)
+function dispatch(Http $http, string $method, string $target)
 {
     TestHarness::reset();
 

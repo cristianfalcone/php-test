@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Ajo;
 
-use Ajo\Core\Console as CoreConsole;
 use ArrayObject;
 use AssertionError;
 use Closure;
@@ -16,16 +15,17 @@ use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use ReflectionFunction;
 use Throwable;
+use BadMethodCallException;
 
 /**
  * Test runner.
- * 
- * Files within the configured directory should register suites using:
+ *
+ * Files within the configured directories should register suites using:
  *
  * ```php
- * Test::describe('Contexto', function () {
+ * Test::suite('Context', function () {
  *   Test::beforeEach(fn($state) => $state['count'] = ($state['count'] ?? 0) + 1);
- *   Test::it('should increment the counter', function ($state) {
+ *   Test::case('increments the counter', function ($state) {
  *       Test::assertTrue($state['count'] > 0);
  *   });
  * });
@@ -83,7 +83,7 @@ final class Test
     // PUBLIC API ============================================================
 
     /** Registers test commands in the CLI */
-    public static function register(CoreConsole $cli, array $paths = []): self
+    public static function register(ConsoleCore $cli, array $paths = []): self
     {
         $normalize = fn($value) => array_values((array)($value ?? []));
 
@@ -92,25 +92,28 @@ final class Test
         $self->sourcePaths = $normalize($paths['src'] ?? 'src');
 
         $cli->command('test', fn() => $self->run())
-            ->describe(sprintf('Runs tests defined in %s.', implode(', ', $self->testPaths)))
+            ->describe(sprintf('Run tests defined in %s', implode(', ', $self->testPaths)))
             ->usage('[filter] [options]')
-            ->usage('[options]')
             ->option('-b, --bail', 'Stop on first failure')
-            ->option('-c, --coverage', 'Generate coverage report (html or file path)')
-            ->option('--log', 'Export results to JUnit XML file')
-            ->option('-p, --parallel', 'Run tests in parallel (auto-detect CPU count or specify number)')
+            ->option('-c, --coverage', 'Generate coverage report (true=console, html=HTML report, or file path for XML)')
+            ->option('-p, --parallel', 'Run in parallel (true=auto-detect CPUs, or specify worker count)')
             ->option('--filter', 'Filter by suite name, test name, or file path')
-            ->example('Console', 'Run tests matching "Console" (suite, test, or file)')
-            ->example('--filter=Job', 'Run tests matching "Job"')
-            ->example('--coverage=html', 'Generate HTML coverage report')
-            ->example('--parallel=4 --bail', 'Run with 4 workers, stop on first failure');
+            ->option('--log', 'Export results to JUnit XML file path')
+            ->example('Console', 'Run tests matching "Console"')
+            ->example('--filter=Job', 'Filter tests by name')
+            ->example('--coverage', 'Show coverage summary in console')
+            ->example('--coverage=html', 'Generate HTML coverage report in coverage/')
+            ->example('--coverage=coverage.xml', 'Generate Cobertura XML report')
+            ->example('--parallel', 'Auto-detect CPUs and run in parallel')
+            ->example('--parallel=4', 'Run with 4 workers')
+            ->example('--bail --parallel=2', 'Parallel execution, stop on first failure');
 
         $cli->command('test:list', fn() => $self->list())
-            ->describe('Lists available test suites and cases.')
-            ->usage('[filter]')
+            ->describe('List available test suites and cases')
+            ->usage('[filter] [options]')
             ->option('--filter', 'Filter by suite name, test name, or file path')
-            ->example('Job', 'List tests matching "Job"')
-            ->example('--filter=Unit/Console', 'List tests from Console file');
+            ->example('Console', 'List tests matching "Console"')
+            ->example('--filter=Unit/Console', 'List tests from specific file');
 
         return $self;
     }
@@ -148,12 +151,6 @@ final class Test
         return $self;
     }
 
-    /** Alias for suite() with describe/it nomenclature */
-    public static function describe(string $name, callable $builder, array $state = []): self
-    {
-        return self::suite($name, $builder, $state);
-    }
-
     /** Registers a test case */
     public static function case(string $name, callable $handler, array $options = []): self
     {
@@ -161,17 +158,11 @@ final class Test
             $self = self::$instance;
             $suite = &$self->suites[$self->current];
             $only = (bool)($options['only'] ?? false);
-            $reflection = new \ReflectionFunction($handler);
+            $reflection = new ReflectionFunction($handler);
             $suite['tests'][] = ['name' => $name, 'handler' => $self->wrap($handler), 'skip' => (bool)($options['skip'] ?? false), 'only' => $only, 'line' => $reflection->getStartLine()];
             $suite['last'] = array_key_last($suite['tests']);
             if ($only) $self->hasOnly = true;
         });
-    }
-
-    /** Alias for case() with describe/it nomenclature */
-    public static function it(string $name, callable $handler, array $options = []): self
-    {
-        return self::case($name, $handler, $options);
     }
 
     /** Defines hook that runs before all tests in the suite */
@@ -260,7 +251,7 @@ final class Test
         ];
 
         if (isset($assertions[$name])) return $assertions[$name]();
-        throw new \BadMethodCallException("Method $name does not exist");
+        throw new BadMethodCallException("Method $name does not exist");
     }
 
     /** Verifies that a specific exception type is thrown */
@@ -317,7 +308,7 @@ final class Test
         $coverageEnabled = $this->startCoverage($coverage !== null);
 
         if ($this->queue === []) {
-            if (!$isParallel) Console::log('No tests found.');
+            if (!$isParallel) Console::line('No tests found.');
             $this->stopCoverage($coverageEnabled);
             return 0;
         }
@@ -351,7 +342,7 @@ final class Test
 
             if (!$isParallel) {
                 Console::blank();
-                Console::log(Console::bold($title));
+                Console::line(Console::bold($title));
             }
 
             $record = fn($type, $name, $seconds = null, $error = null, $testIndex = null, $line = null) => $isParallel
@@ -412,7 +403,7 @@ final class Test
     private function parallel(int $workers, bool $bail, $filter, $coverage, $log)
     {
         if ($coverage || !extension_loaded('sysvshm')) {
-            Console::warn($coverage ? 'Coverage is not supported in parallel mode. Running sequentially...' : 'sysvshm not available, falling back to sequential...');
+            Console::warning($coverage ? 'Coverage is not supported in parallel mode. Running sequentially...' : 'sysvshm not available, falling back to sequential...');
             return $this->sequential($bail, $filter, $coverage, $log);
         }
 
@@ -422,14 +413,14 @@ final class Test
         $shm = $this->createMemory();
         $started = microtime(true);
 
-        Console::log(sprintf('Running %d tests in %d workers...', $totalTests, count($chunks)));
+        Console::line(sprintf('Running %d tests in %d workers...', $totalTests, count($chunks)));
         Console::blank();
 
         $pids = [];
 
         foreach ($chunks as $chunk) {
             $pid = pcntl_fork();
-            if ($pid === -1) return (Console::warn('Fork failed, falling back to sequential...') || $this->cleanupMemory($shm)) && $this->sequential($bail, $filter, $coverage, $log);
+            if ($pid === -1) return (Console::warning('Fork failed, falling back to sequential...') || $this->cleanupMemory($shm)) && $this->sequential($bail, $filter, $coverage, $log);
             if ($pid === 0) {
                 $this->queue = $chunk;
                 exit($this->sequential($bail, $filter, null, null, $shm));
@@ -473,7 +464,7 @@ final class Test
             $location = ' ' . Console::dim($filePath . ':' . $line);
         }
 
-        Console::log(sprintf(
+        Console::line(sprintf(
             '  %s %s %s%s',
             Console::$color($badge),
             $name,
@@ -510,7 +501,7 @@ final class Test
                 if ($snippet) {
                     foreach ($snippet as $lineNum => $code) {
                         $prefix = $lineNum === $errorLine ? '  > ' : '    ';
-                        Console::dim()->log(sprintf('%s%d: %s', $prefix, $lineNum, $code));
+                        Console::dim()->line(sprintf('%s%d: %s', $prefix, $lineNum, $code));
                     }
                     Console::blank();
                 }
@@ -519,7 +510,7 @@ final class Test
             // Show error message (handle multiline messages)
             $lines = explode("\n", $normalized['message']);
             foreach ($lines as $msgLine) {
-                Console::red()->log('    ' . $msgLine);
+                Console::red()->line('    ' . $msgLine);
             }
             Console::blank();
 
@@ -527,10 +518,10 @@ final class Test
             $filtered = $this->filterStackTrace($normalized['trace'], $classname);
             if (!empty($filtered)) {
                 foreach (array_slice($filtered, 0, 3) as $frame) {
-                    Console::dim()->log(sprintf('    at %s', $frame));
+                    Console::dim()->line(sprintf('    at %s', $frame));
                 }
             } else {
-                Console::dim()->log(sprintf('    at %s:%d', $normalized['file'], $normalized['line']));
+                Console::dim()->line(sprintf('    at %s:%d', $normalized['file'], $normalized['line']));
             }
         }
 
@@ -549,12 +540,12 @@ final class Test
     private function summary(float $startedAt)
     {
         Console::blank();
-        Console::bold()->log('Summary:');
-        Console::log('  Total:   ' . array_sum($this->summary));
-        Console::log('  Passed:  ' . $this->summary['passed']);
-        Console::log('  Skipped: ' . $this->summary['skipped']);
-        Console::log('  Failed:  ' . $this->summary['failed']);
-        Console::log('  Time:    ' . $this->duration(microtime(true) - $startedAt));
+        Console::bold()->line('Summary:');
+        Console::line('  Total:   ' . array_sum($this->summary));
+        Console::line('  Passed:  ' . $this->summary['passed']);
+        Console::line('  Skipped: ' . $this->summary['skipped']);
+        Console::line('  Failed:  ' . $this->summary['failed']);
+        Console::line('  Time:    ' . $this->duration(microtime(true) - $startedAt));
     }
 
     /** Formats elapsed time into a compact string */
@@ -582,7 +573,7 @@ final class Test
             if (!isset($grouped[$suiteId])) continue;
             $suite = $this->suites[$suiteId];
             Console::blank();
-            Console::log(Console::bold($suite['title']));
+            Console::line(Console::bold($suite['title']));
             array_walk($grouped[$suiteId], fn($r) => $this->render(
                 $r['type'],
                 $r['name'],
@@ -741,14 +732,17 @@ final class Test
         $codeCss = 'body{font-family:system-ui,sans-serif;margin:0;background:#f9fafb}h1{margin:20px;color:#111827}.code{background:white;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin:20px}pre{margin:0;padding:0;font-family:monospace;font-size:13px;line-height:1.5}.line{display:flex;border-bottom:1px solid #f3f4f6}.num{background:#f9fafb;color:#6b7280;padding:0 12px;min-width:50px;text-align:right;user-select:none}.src{flex:1;padding:0 12px;white-space:pre}.covered{background:#dcfce7}.uncovered{background:#fee2e2}a{margin:20px;display:inline-block;color:#2563eb;text-decoration:none}a:hover{text-decoration:underline}';
 
         // Index page
-        $rows = array_map(fn($file, $data) => sprintf(
-            '<tr><td>%s</td><td><a href="%s">%s</a></td><td class="right">%d/%d</td></tr>',
-            $badge($data['percent']),
-            htmlspecialchars(str_replace(['/', '.php'], ['_', ''], $file) . '.html'),
-            htmlspecialchars($file),
-            $data['covered'],
-            $data['total']
-        ), array_keys($summary['filesBreakdown']), $summary['filesBreakdown']);
+        $rows = [];
+        foreach ($summary['filesBreakdown'] as $file => $data) {
+            $rows[] = sprintf(
+                '<tr><td>%s</td><td><a href="%s">%s</a></td><td class="right">%d/%d</td></tr>',
+                $badge($data['percent']),
+                htmlspecialchars(str_replace(['/', '.php'], ['_', ''], $file) . '.html'),
+                htmlspecialchars($file),
+                $data['covered'],
+                $data['total']
+            );
+        }
 
         $totalRow = sprintf(
             '<tr style="font-weight:bold;border-top:2px solid #9ca3af"><td>%s</td><td>Total (%d files)</td><td class="right">%d/%d</td></tr>',
@@ -916,9 +910,9 @@ final class Test
 
         $summary = $this->coverageSummary($coverage);
         Console::blank();
-        Console::bold()->log('Coverage:');
+        Console::bold()->line('Coverage:');
 
-        if ($summary['files'] === 0 || $summary['total'] === 0) return Console::log('  No executable lines registered in src/.') ?: $coverage;
+        if ($summary['files'] === 0 || $summary['total'] === 0) return Console::line('  No executable lines registered in src/.') ?: $coverage;
 
         Console::blank();
 
@@ -1003,7 +997,7 @@ final class Test
         if (!$this->load()) return 1;
 
         if ($this->queue === []) {
-            Console::log('No suites registered.');
+            Console::line('No suites registered.');
             return 0;
         }
 
@@ -1025,17 +1019,17 @@ final class Test
                 ? substr($suite['file'], strlen($base))
                 : $suite['file'];
 
-            Console::log(Console::bold($suite['title']));
+            Console::line(Console::bold($suite['title']));
             foreach ($tests as $test) {
                 $location = ($filePath && isset($test['line']))
                     ? ' ' . Console::dim($filePath . ':' . $test['line'])
                     : '';
-                Console::log('  ' . $test['name'] . $location);
+                Console::line('  ' . $test['name'] . $location);
             }
             Console::blank();
         }
 
-        if ($shown === 0) Console::log('No tests match the filter.');
+        if ($shown === 0) Console::line('No tests match the filter.');
 
         return 0;
     }
@@ -1195,10 +1189,12 @@ final class Test
         if ($respectOnly && $this->hasOnly && !$suite['only']) $tests = array_filter($tests, static fn($test) => $test['only']);
         if ($filter) {
             $needle = strtolower($filter);
-            $tests = array_filter($tests, static fn($test) =>
+            $tests = array_filter(
+                $tests,
+                static fn($test) =>
                 str_contains(strtolower($suite['title']), $needle) ||
-                str_contains(strtolower($test['name']), $needle) ||
-                str_contains(strtolower($suite['file'] ?? ''), $needle)
+                    str_contains(strtolower($test['name']), $needle) ||
+                    str_contains(strtolower($suite['file'] ?? ''), $needle)
             );
         }
         return array_values($tests);

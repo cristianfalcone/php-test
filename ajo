@@ -1,0 +1,70 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Ajo\Console;
+use Ajo\Container;
+use Ajo\Database;
+use Ajo\Migrations;
+use Ajo\Job;
+use Ajo\Test;
+
+require __DIR__ . '/vendor/autoload.php';
+
+Console::use(fn() => Container::set('db', Database::get()));
+
+Migrations::register(Console::instance(), __DIR__ . '/migrations');
+
+// Initialize Job with PDO instance using create()
+Job::swap(Job::create(Database::get()));
+
+Job::register(Console::instance());
+
+// Job scheduling examples
+Job::schedule('emails.send', function () {
+    Console::info('Sending pending emails...');
+})
+    ->everyFiveMinutes()
+    ->queue('emails')
+    ->concurrency(3)
+    ->priority(10);
+
+Job::schedule('report.daily', function () {
+    Console::info('Daily report...');
+})
+    ->daily()
+    ->hours(2)  // 2am
+    ->months([1, 4, 7, 10])  // Run only in Jan, Apr, Jul, Oct
+    ->queue('reports')
+    ->priority(50);
+
+Job::schedule('monitor.health', function () {
+    Console::info('Health check...');
+})
+    ->everyTenSeconds()  // Sub-minute scheduling
+    ->when(fn() => getenv('ENABLE_MONITORING') === 'true');
+
+Test::register(Console::instance());
+
+// Example command with options
+Console::command('demo', function () {
+    $opts = Console::options();
+
+    Console::line('Positional args: ' . implode(', ', $opts['_']));
+    Console::line('Verbose: ' . ($opts['verbose'] ?? 'false'));
+    Console::line('Output: ' . ($opts['output'] ?? 'default'));
+    Console::line('Environment: ' . $opts['env']);
+
+    return 0;
+})
+    ->describe('Demo command with options')
+    ->usage('<file> [<file>...] [options]')
+    ->option('-v, --verbose', 'Enable verbose output')
+    ->option('-o, --output', 'Output file')
+    ->option('-e, --env', 'Environment', 'development')
+    ->example('file1.txt file2.txt -v', 'Process files with verbose output')
+    ->example('-e production --output=dist/bundle.js', 'Build for production')
+    ->example('src/ --no-color', 'Process directory without colors');
+
+exit(Console::dispatch());

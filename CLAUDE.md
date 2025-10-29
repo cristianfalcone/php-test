@@ -28,7 +28,7 @@ podman compose up -d
 All PHP commands must run inside the `app` container:
 
 ```bash
-podman compose exec app php console <command>
+podman compose exec app php ajo <command>
 ```
 
 ## Test Runner
@@ -39,68 +39,77 @@ podman compose exec app php console <command>
 
 Run all tests:
 ```bash
-podman compose exec app php console test
+podman compose exec app php ajo test
 ```
 
 Run specific test suite:
 ```bash
-podman compose exec app php console test --filter=Console
-podman compose exec app php console test --filter=Job
+podman compose exec app php ajo test --filter=Console
+podman compose exec app php ajo test --filter=Job
 ```
 
 Run tests in parallel (uses pcntl_fork):
 ```bash
-podman compose exec app php console test --parallel
+podman compose exec app php ajo test --parallel
 ```
 
 Run with code coverage (uses pcov):
 ```bash
-podman compose exec app php console test --coverage
+podman compose exec app php ajo test --coverage
 ```
 
 Generate coverage report to file:
 ```bash
-podman compose exec app php console test --coverage=coverage.xml
+podman compose exec app php ajo test --coverage=coverage.xml
 ```
 
 Export test results to JUnit XML:
 ```bash
-podman compose exec app php console test --log=junit.xml
+podman compose exec app php ajo test --log=junit.xml
 ```
 
 List available tests:
 ```bash
-podman compose exec app php console test:list
+podman compose exec app php ajo test:list
 ```
 
 ### Writing Tests
 
-Tests use a custom BDD-style API:
+Tests use a custom test API with direct, descriptive naming:
 
 ```php
-Test::describe('Feature Name', function () {
+Test::suite('Feature Name', function () {
     Test::beforeEach(fn($state) => $state['value'] = 10);
 
-    Test::it('should do something', function ($state) {
+    Test::case('increments the counter', function ($state) {
         Test::assertEquals(10, $state['value']);
     });
 });
 ```
 
-Available assertions: `assertTrue`, `assertFalse`, `assertNull`, `assertNotNull`, `assertSame`, `assertEquals`, `assertCount`, `assertArrayHasKey`, `assertInstanceOf`, `assertStringContainsString`, `assertContains`, `expectException`.
+**Test naming conventions:**
+- Use **direct present tense** (3rd person singular): `creates instance`, `parses arguments`, `throws on error`
+- Avoid BDD-style "should" prefix (removed from the framework)
+- Use `Test::suite()` to group tests (not `describe()`)
+- Use `Test::case()` to define test cases (not `it()`)
+
+**Available assertions:** `assertTrue`, `assertFalse`, `assertNull`, `assertNotNull`, `assertSame`, `assertEquals`, `assertCount`, `assertArrayHasKey`, `assertInstanceOf`, `assertStringContainsString`, `assertContains`, `expectException`.
+
+**Available hooks:** `beforeEach`, `afterEach`, `before`, `after` - use for test setup/teardown with `$state` parameter for sharing data between hooks and tests.
 
 ## Architecture
 
 ### Core + Facade Pattern
 
-The codebase uses a **two-layer architecture**:
+The codebase uses a **two-layer architecture within single files**:
 
-1. **`src/Core/`** - Concrete implementations that work as independent instances without shared state
-2. **`src/`** - Static facades that delegate to Core instances via the Facade trait
+Each file in `src/` contains both layers:
+1. **Core class** (e.g., `ConsoleCore`) - Concrete implementation that works as an independent instance without shared state
+2. **Facade class** (e.g., `Console`) - Static facade that delegates to Core instance via the Facade trait
 
-Example:
-- [src/Core/Console.php](src/Core/Console.php) - Instance-based console implementation
-- [src/Console.php](src/Console.php) - Static facade for Console
+Example in [src/Console.php](src/Console.php):
+- `ConsoleCore` - Instance-based console implementation
+- `Console` - Static facade for ConsoleCore
 
 ### Facades
 
@@ -126,7 +135,7 @@ $cli->command('test', fn() => 0);
 
 ### Container
 
-The [Container](src/Core/Container.php) is a simple dependency injection container supporting:
+The [Container](src/Container.php) is a simple dependency injection container supporting:
 - `set(id, value)` - Store a value
 - `singleton(id, factory)` - Register lazy singleton
 - `factory(id, factory)` - Register factory (new instance each time)
@@ -141,61 +150,61 @@ Facades automatically use the Container to manage their singleton instances.
 
 Install migrations table:
 ```bash
-podman compose exec app php console migrate:install
+podman compose exec app php ajo migrate:install
 ```
 
 Run pending migrations:
 ```bash
-podman compose exec app php console migrate
+podman compose exec app php ajo migrate
 ```
 
 Check migration status:
 ```bash
-podman compose exec app php console migrate:status
+podman compose exec app php ajo migrate:status
 ```
 
 Rollback last batch:
 ```bash
-podman compose exec app php console migrate:rollback
+podman compose exec app php ajo migrate:rollback
 ```
 
 Create new migration:
 ```bash
-podman compose exec app php console migrate:make create_users_table
+podman compose exec app php ajo migrate:make create_users_table
 ```
 
 ### Job Scheduler
 
 Install jobs table:
 ```bash
-podman compose exec app php console jobs:install
+podman compose exec app php ajo jobs:install
 ```
 
 Check jobs status:
 ```bash
-podman compose exec app php console jobs:status
+podman compose exec app php ajo jobs:status
 ```
 
 Execute due jobs once:
 ```bash
-podman compose exec app php console jobs:collect
+podman compose exec app php ajo jobs:collect
 ```
 
 Run job worker (continuous):
 ```bash
-podman compose exec app php console jobs:work
+podman compose exec app php ajo jobs:work
 ```
 
 Prune stale jobs:
 ```bash
-podman compose exec app php console jobs:prune
+podman compose exec app php ajo jobs:prune
 ```
 
 ### Other Commands
 
 List all commands:
 ```bash
-podman compose exec app php console help
+podman compose exec app php ajo help
 ```
 
 Access container shell:
@@ -380,10 +389,11 @@ See [.claude/skills/xdebug-inspect/SKILL.md](.claude/skills/xdebug-inspect/SKILL
 
 ## Key Files
 
-- [console](console) - CLI entry point that registers commands
+- [ajo](ajo) - CLI entry point that registers commands
 - [src/Test.php](src/Test.php) - Custom test runner with parallel execution support
-- [src/Core/Facade.php](src/Core/Facade.php) - Base trait for all facades
-- [src/Core/Container.php](src/Core/Container.php) - Dependency injection container
-- [src/Core/Console.php](src/Core/Console.php) - CLI framework implementation
-- [src/Core/Job.php](src/Core/Job.php) - Job scheduler implementation
-- [AGENTS.md](AGENTS.md) - Detailed coding philosophy and examples
+- [src/Facade.php](src/Facade.php) - Base trait for all facades
+- [src/Container.php](src/Container.php) - Dependency injection container
+- [src/Console.php](src/Console.php) - CLI framework (ConsoleCore + Console facade)
+- [src/Job.php](src/Job.php) - Job scheduler (JobCore + Job facade)
+- [src/Http.php](src/Http.php) - HTTP response builder (HttpCore + Http facade)
+- [src/Router.php](src/Router.php) - Base routing class for Console and Http

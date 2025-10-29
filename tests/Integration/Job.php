@@ -9,18 +9,17 @@ use DateTimeImmutable;
 use PDO;
 use RuntimeException;
 
-// Force autoload Job2 to make Cron2 and Clock2 available
-class_exists(\Ajo\Core\Job2::class);
+// Force autoload Job to make Cron and Clock available
+class_exists(\Ajo\JobCore::class);
 
-use Ajo\Core\Job2;
-use Ajo\Core\Cron2;
-use Ajo\Core\Clock2;
+use Ajo\JobCore as Job;
+use Ajo\Clock;
 
 // ============================================================================
 // Test Clock for deterministic time control
 // ============================================================================
 
-final class FakeClock implements Clock2
+final class FakeClock implements Clock
 {
     private DateTimeImmutable $now;
 
@@ -52,14 +51,19 @@ final class FakeClock implements Clock2
 function createTestPDO(): PDO
 {
     static $pdo = null;
+    static $pid = null;
+    $currentPid = getmypid();
 
     // Check if connection is alive, reconnect if not
-    if ($pdo !== null) {
+    if ($pdo !== null && $pid === $currentPid) {
         try {
             $pdo->query('SELECT 1');
         } catch (\PDOException) {
             $pdo = null; // Force reconnection
         }
+    }
+    if ($pid !== $currentPid) {
+        $pdo = null;
     }
 
     if ($pdo === null) {
@@ -72,6 +76,7 @@ function createTestPDO(): PDO
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             ]
         );
+        $pid = $currentPid;
     }
 
     return $pdo;
@@ -83,8 +88,11 @@ function createTestPDO(): PDO
 function getTestTableName(): string
 {
     static $tableName = null;
-    if ($tableName === null) {
-        $tableName = 'jobs_test_' . getmypid();
+    static $pid = null;
+    $currentPid = getmypid();
+    if ($tableName === null || $pid !== $currentPid) {
+        $pid = $currentPid;
+        $tableName = 'jobs_test_' . $currentPid;
     }
     return $tableName;
 }
@@ -99,7 +107,7 @@ function cleanJobsTable(PDO $pdo, ?string $tableName = null): void
     }
 }
 
-Test::describe('Job2 Integration Tests', function () {
+Test::suite('Job Integration Tests', function () {
 
     // ========================================================================
     // Schema Installation
@@ -109,14 +117,14 @@ Test::describe('Job2 Integration Tests', function () {
         $state['pdo'] = createTestPDO();
         cleanJobsTable($state['pdo']);
         $state['clock'] = new FakeClock();
-        $state['job'] = new Job2($state['pdo'], $state['clock'], getTestTableName());
+        $state['job'] = new Job($state['pdo'], $state['clock'], getTestTableName());
     });
 
     Test::afterEach(function ($state) {
         cleanJobsTable($state['pdo']);
     });
 
-    Test::it('install creates table with correct schema', function ($state) {
+    Test::case('install creates table with correct schema', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -164,7 +172,7 @@ Test::describe('Job2 Integration Tests', function () {
     // Encolado Idempotente
     // ========================================================================
 
-    Test::it('enqueue now is idempotent across processes', function ($state) {
+    Test::case('enqueue now is idempotent across processes', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
         $clock = $state['clock'];
@@ -201,7 +209,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertStringContainsString('test-cron|', $uniqueKey);
     });
 
-    Test::it('enqueue next slot reduces drift', function ($state) {
+    Test::case('enqueue next slot reduces drift', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
         $clock = $state['clock'];
@@ -243,10 +251,10 @@ Test::describe('Job2 Integration Tests', function () {
     // Dispatch On-Demand
     // ========================================================================
 
-    Test::it('dispatch FQCN without schedule auto-defines and lazy resolves handler', function () {
+    Test::case('dispatch FQCN without schedule auto-defines and lazy resolves handler', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         // Clear any previous execution proof
@@ -275,10 +283,10 @@ Test::describe('Job2 Integration Tests', function () {
         cleanJobsTable($pdo);
     });
 
-    Test::it('dispatch FQCN with instance handle method', function () {
+    Test::case('dispatch FQCN with instance handle method', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         // Clear any previous execution proof
@@ -298,10 +306,10 @@ Test::describe('Job2 Integration Tests', function () {
         cleanJobsTable($pdo);
     });
 
-    Test::it('active creates draft on-demand with builder pattern', function () {
+    Test::case('active creates draft on-demand with builder pattern', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         // Use builder pattern without schedule()
@@ -332,10 +340,10 @@ Test::describe('Job2 Integration Tests', function () {
         cleanJobsTable($pdo);
     });
 
-    Test::it('at() post-dispatch updates run_at when not claimed', function () {
+    Test::case('at() post-dispatch updates run_at when not claimed', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         unset($GLOBALS['test_job_executed']);
@@ -366,10 +374,10 @@ Test::describe('Job2 Integration Tests', function () {
         cleanJobsTable($pdo);
     });
 
-    Test::it('at() post-dispatch throws when job already claimed', function () {
+    Test::case('at() post-dispatch throws when job already claimed', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         // Dispatch job
@@ -394,7 +402,7 @@ Test::describe('Job2 Integration Tests', function () {
         cleanJobsTable($pdo);
     });
 
-    Test::it('args are used as defaults for cron dispatch', function ($state) {
+    Test::case('args are used as defaults for cron dispatch', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
         $clock = $state['clock'];
@@ -423,7 +431,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(['region' => 'eu', 'batch_size' => 100], $storedArgs, 'Default args should be stored');
     });
 
-    Test::it('runAt staging cleared after dispatch', function ($state) {
+    Test::case('runAt staging cleared after dispatch', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -452,11 +460,11 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(1, $count);
     });
 
-    Test::it('dispatch immediate executes even without cron match', function () {
+    Test::case('dispatch immediate executes even without cron match', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
         // NOTE: Use real clock for this suite because batch() uses MySQL NOW(6)
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         $executed = false;
@@ -485,10 +493,10 @@ Test::describe('Job2 Integration Tests', function () {
         cleanJobsTable($pdo);
     });
 
-    Test::it('dispatch with delay respects eta', function () {
+    Test::case('dispatch with delay respects eta', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         $executed = false;
@@ -536,10 +544,10 @@ Test::describe('Job2 Integration Tests', function () {
         cleanJobsTable($pdo);
     });
 
-    Test::it('dispatch serializes and passes args', function () {
+    Test::case('dispatch serializes and passes args', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         $receivedArgs = null;
@@ -575,7 +583,7 @@ Test::describe('Job2 Integration Tests', function () {
     // Selección y Claim
     // ========================================================================
 
-    Test::it('batch claims respect ordering', function ($state) {
+    Test::case('batch claims respect ordering', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -608,7 +616,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(['high', 'medium', 'low'], $executionOrder);
     });
 
-    Test::it('claim is non-blocking with skip locked', function ($state) {
+    Test::case('claim is non-blocking with skip locked', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -638,7 +646,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertCount(1, $locked, 'Should lock one row');
 
         // Second connection tries to claim using SKIP LOCKED
-        $job2 = new Job2($pdo2, $state['clock'], getTestTableName());
+        $job2 = new Job($pdo2, $state['clock'], getTestTableName());
         $job2->schedule('test-job', fn() => null);
 
         $reflection = new \ReflectionClass($job2);
@@ -661,7 +669,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertCount(1, $runs2, 'Should claim after lock is released');
     });
 
-    Test::it('only known job names are fetched', function ($state) {
+    Test::case('only known job names are fetched', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -689,7 +697,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals('known-job', $runs[0]['name']);
     });
 
-    Test::it('lease is set on claim and cleared on finish', function ($state) {
+    Test::case('lease is set on claim and cleared on finish', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
         $clock = $state['clock'];
@@ -739,7 +747,7 @@ Test::describe('Job2 Integration Tests', function () {
     // Concurrencia Per-Job
     // ========================================================================
 
-    Test::it('concurrency slots limit parallel executions', function ($state) {
+    Test::case('concurrency slots limit parallel executions', function ($state) {
         $job = $state['job'];
         $job->install();
 
@@ -770,7 +778,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(2, $jobs['limited-job']['concurrency']);
     });
 
-    Test::it('release of named locks on success and error', function ($state) {
+    Test::case('release of named locks on success and error', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -802,7 +810,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertNull($locks, 'Lock should be released');
     });
 
-    Test::it('acquires different slots for same job', function ($state) {
+    Test::case('acquires different slots for same job', function ($state) {
         $job = $state['job'];
 
         $job->install();
@@ -846,7 +854,7 @@ Test::describe('Job2 Integration Tests', function () {
     // Filtros & Hooks
     // ========================================================================
 
-    Test::it('when false skips execution and preserves row', function ($state) {
+    Test::case('when false skips execution and preserves row', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -870,7 +878,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(1, $count, 'Job row should be preserved after when() returns false');
     });
 
-    Test::it('skip true skips execution', function ($state) {
+    Test::case('skip true skips execution', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -894,7 +902,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(1, $count);
     });
 
-    Test::it('multiple hooks execute in registration order', function ($state) {
+    Test::case('multiple hooks execute in registration order', function ($state) {
         $job = $state['job'];
 
         $job->install();
@@ -903,13 +911,26 @@ Test::describe('Job2 Integration Tests', function () {
 
         $job->schedule('hooked-job', function ($args) use (&$order) {
             $order[] = 'handler';
+            return $args;
         })
-        ->before(function($args) use (&$order) { $order[] = 'before1'; })
-        ->before(function($args) use (&$order) { $order[] = 'before2'; })
-        ->then(function($args) use (&$order) { $order[] = 'then1'; })
-        ->then(function($args) use (&$order) { $order[] = 'then2'; })
-        ->finally(function($args) use (&$order) { $order[] = 'finally1'; })
-        ->finally(function($args) use (&$order) { $order[] = 'finally2'; });
+        ->before(function($args) use (&$order) {
+            $order[] = 'before1';
+            return $args;
+        })
+        ->before(function($args) use (&$order) {
+            $order[] = 'before2';
+            return $args;
+        })
+        ->then(function($result) use (&$order) {
+            $order[] = 'then1';
+            return $result;
+        })
+        ->then(function($result) use (&$order) {
+            $order[] = 'then2';
+            return $result;
+        })
+        ->finally(function() use (&$order) { $order[] = 'finally1'; })
+        ->finally(function() use (&$order) { $order[] = 'finally2'; });
 
         $job->dispatch('hooked-job');
         $job->run();
@@ -926,7 +947,7 @@ Test::describe('Job2 Integration Tests', function () {
         ], $order);
     });
 
-    Test::it('hooks execute on error path', function ($state) {
+    Test::case('hooks execute on error path', function ($state) {
         $job = $state['job'];
 
         $job->install();
@@ -938,12 +959,16 @@ Test::describe('Job2 Integration Tests', function () {
             $order[] = 'handler';
             throw new \RuntimeException('Test error');
         })
-        ->before(function($args) use (&$order) { $order[] = 'before'; })
-        ->catch(function ($e, $args) use (&$order, &$caughtException) {
+        ->before(function($args) use (&$order) {
+            $order[] = 'before';
+            return $args;
+        })
+        ->catch(function ($e) use (&$order, &$caughtException) {
             $order[] = 'catch';
             $caughtException = $e;
+            return null; // No recovery
         })
-        ->finally(function($args) use (&$order) { $order[] = 'finally'; });
+        ->finally(function() use (&$order) { $order[] = 'finally'; });
 
         $job->dispatch('error-job');
         $job->run();
@@ -954,11 +979,179 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals('Test error', $caughtException->getMessage());
     });
 
+    Test::case('before() transforms arguments for handler', function ($state) {
+        $job = $state['job'];
+
+        $job->install();
+
+        $receivedByHandler = null;
+
+        $job->schedule('transform-job', function ($args) use (&$receivedByHandler) {
+            $receivedByHandler = $args;
+            return $args;
+        })
+        ->before(fn($args) => array_merge($args, ['step' => 'before1']))
+        ->before(fn($args) => array_merge($args, ['count' => $args['count'] + 10]))
+        ->args(['count' => 5]);
+
+        $job->dispatch('transform-job');
+        $job->run();
+
+        // Handler should receive transformed args from chained before()
+        Test::assertEquals(['count' => 15, 'step' => 'before1'], $receivedByHandler);
+    });
+
+    Test::case('then() receives and chains handler result', function ($state) {
+        $job = $state['job'];
+
+        $job->install();
+
+        $values = [];
+
+        $job->schedule('chain-job', function ($args) use (&$values) {
+            $values[] = 'handler';
+            return ['result' => 'success', 'value' => 100];
+        })
+        ->then(function ($result) use (&$values) {
+            $values[] = 'then1';
+            Test::assertEquals(['result' => 'success', 'value' => 100], $result);
+            return ['value' => $result['value'] * 2];
+        })
+        ->then(function ($result) use (&$values) {
+            $values[] = 'then2';
+            Test::assertEquals(['value' => 200], $result);
+            return $result;
+        });
+
+        $job->dispatch('chain-job');
+        $job->run();
+
+        Test::assertEquals(['handler', 'then1', 'then2'], $values);
+    });
+
+    Test::case('catch() can recover from error', function ($state) {
+        $job = $state['job'];
+        $pdo = $state['pdo'];
+
+        $job->install();
+
+        $order = [];
+
+        $job->schedule('recoverable-job', function () use (&$order) {
+            $order[] = 'handler';
+            throw new \RuntimeException('Recoverable error');
+        })
+        ->catch(function ($e) use (&$order) {
+            $order[] = 'catch-recover';
+            // Return non-null to recover
+            return ['recovered' => true];
+        })
+        ->catch(function ($e) use (&$order) {
+            // This should NOT execute because previous catch() recovered
+            $order[] = 'catch2-should-not-run';
+        })
+        ->finally(function() use (&$order) { $order[] = 'finally'; });
+
+        $job->dispatch('recoverable-job');
+        $job->run();
+
+        Test::assertEquals(['handler', 'catch-recover', 'finally'], $order);
+
+        // Job should be deleted (not retried) because it was recovered
+        $row = $pdo->query("SELECT * FROM `".getTestTableName()."` WHERE name='recoverable-job'")->fetch();
+        Test::assertFalse($row, 'Recovered job should be deleted');
+    });
+
+    Test::case('catch() chains when not recovering', function ($state) {
+        $job = $state['job'];
+
+        $job->install();
+
+        $order = [];
+        $errors = [];
+
+        $job->schedule('multi-catch-job', function () use (&$order) {
+            $order[] = 'handler';
+            throw new \RuntimeException('Original error');
+        })
+        ->catch(function ($e) use (&$order, &$errors) {
+            $order[] = 'catch1';
+            $errors[] = $e->getMessage();
+            // Return null = no recovery, continue to next catch
+            return null;
+        })
+        ->catch(function ($e) use (&$order, &$errors) {
+            $order[] = 'catch2';
+            $errors[] = $e->getMessage();
+            return null;
+        })
+        ->finally(function() use (&$order) { $order[] = 'finally'; });
+
+        $job->dispatch('multi-catch-job');
+        $job->run();
+
+        Test::assertEquals(['handler', 'catch1', 'catch2', 'finally'], $order);
+        Test::assertEquals(['Original error', 'Original error'], $errors);
+    });
+
+    Test::case('catch() can transform error', function ($state) {
+        $job = $state['job'];
+
+        $job->install();
+
+        $order = [];
+        $errors = [];
+
+        $job->schedule('transform-error-job', function () use (&$order) {
+            $order[] = 'handler';
+            throw new \RuntimeException('Original error');
+        })
+        ->catch(function ($e) use (&$order, &$errors) {
+            $order[] = 'catch1';
+            $errors[] = $e->getMessage();
+            // Throw new error to transform it
+            throw new \LogicException('Transformed error');
+        })
+        ->catch(function ($e) use (&$order, &$errors) {
+            $order[] = 'catch2';
+            $errors[] = $e->getMessage();
+            return null;
+        })
+        ->finally(function() use (&$order) { $order[] = 'finally'; });
+
+        $job->dispatch('transform-error-job');
+        $job->run();
+
+        Test::assertEquals(['handler', 'catch1', 'catch2', 'finally'], $order);
+        Test::assertEquals(['Original error', 'Transformed error'], $errors);
+    });
+
+    Test::case('finally() receives no parameters', function ($state) {
+        $job = $state['job'];
+
+        $job->install();
+
+        $finallyCalled = false;
+        $paramCount = null;
+
+        $job->schedule('finally-job', fn() => ['result' => 'done'])
+        ->finally(function (...$params) use (&$finallyCalled, &$paramCount) {
+            $finallyCalled = true;
+            $paramCount = count($params);
+        });
+
+        $job->dispatch('finally-job');
+        $job->run();
+
+        Test::assertTrue($finallyCalled);
+        Test::assertEquals(0, $paramCount, 'finally() should receive no parameters');
+    });
+
     // ========================================================================
     // Retries & Fallas
     // ========================================================================
 
-    Test::it('retry increments attempts and requeues with jitter', function ($state) {
+    Test::case('retry increments attempts and requeues with jitter', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -986,7 +1179,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertTrue($runAt >= $now, 'Job should be rescheduled at or after now');
     });
 
-    Test::it('retry resets on success', function ($state) {
+    Test::case('retry resets on success', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -1020,7 +1213,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(0, $count);
     });
 
-    Test::it('max attempts deletes job on exceed', function ($state) {
+    Test::case('max attempts deletes job on exceed', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -1052,7 +1245,7 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(0, $count);
     });
 
-    Test::it('priority is preserved on retry', function ($state) {
+    Test::case('priority is preserved on retry', function ($state) {
         $job = $state['job'];
         $pdo = $state['pdo'];
 
@@ -1072,10 +1265,10 @@ Test::describe('Job2 Integration Tests', function () {
         Test::assertEquals(50, $row['priority']);
     });
 
-    Test::it('retries with jitter=none uses deterministic backoff', function () {
+    Test::case('retries with jitter=none uses deterministic backoff', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         $attempts = 0;
@@ -1131,10 +1324,10 @@ Test::describe('Job2 Integration Tests', function () {
     // Leases & Stalls
     // ========================================================================
 
-    Test::it('stalled job is reclaimed after lease expiry', function () {
+    Test::case('stalled job is reclaimed after lease expiry', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName()); // Use real clock
+        $job = new Job($pdo, null, getTestTableName()); // Use real clock
         $job->install();
 
         $executions = 0;
@@ -1186,10 +1379,10 @@ Test::describe('Job2 Integration Tests', function () {
     // Graceful Shutdown
     // ========================================================================
 
-    Test::it('stop method stops forever loop gracefully', function () {
+    Test::case('stop method stops forever loop gracefully', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         // Check if pcntl is available
@@ -1219,10 +1412,10 @@ Test::describe('Job2 Integration Tests', function () {
     // Mantenimiento
     // ========================================================================
 
-    Test::it('prune deletes only expired locked rows', function () {
+    Test::case('prune deletes only expired locked rows', function () {
         $pdo = createTestPDO();
         cleanJobsTable($pdo);
-        $job = new Job2($pdo, null, getTestTableName());
+        $job = new Job($pdo, null, getTestTableName());
         $job->install();
 
         // Insert a stale job (locked 2 hours ago)

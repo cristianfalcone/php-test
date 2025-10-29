@@ -2,1360 +2,420 @@
 
 declare(strict_types=1);
 
-namespace Ajo\Tests\Unit\Jobs;
+namespace Ajo\Tests\Unit;
 
-use Ajo\Console;
-use Ajo\Container;
-use Ajo\Core\Job as CoreJob;
-use Ajo\Job;
-use Ajo\Test;
 use DateTimeImmutable;
-use PDO;
-use PDOStatement;
-use ReflectionClass;
 use RuntimeException;
-use Throwable;
-use function Ajo\Tests\Support\Console\dispatch;
-use function Ajo\Tests\Support\Console\silence;
-
-Test::suite('Job', function () {
-
-    Test::beforeEach(function ($state): void {
-        Container::clear();
-
-        $pdo = new MysqlForSqlitePDO();
-        Container::set('db', $pdo);
-
-        $state['pdo'] = $pdo;
-
-        resetSingleton();
-    });
-
-    Test::afterEach(function ($state): void {
-        Container::clear();
-        resetSingleton();
-        unset($state['pdo']);
-    });
-
-    Test::it('should add job commands on register', function () {
-        $cli = Console::create();
-        $jobs = Job::register($cli);
-
-        Test::assertInstanceOf(CoreJob::class, $jobs);
-
-        $commands = $cli->commands();
-
-        foreach (['jobs:install', 'jobs:status', 'jobs:collect', 'jobs:work', 'jobs:prune'] as $command) {
-            Test::assertArrayHasKey($command, $commands, sprintf('Command %s was not registered.', $command));
-        }
-    });
-
-    Test::it('should add job with defaults on schedule', function () {
-        $handler = fn() => null;
-
-        Job::schedule('my-job', $handler)->everyFiveMinutes();
-
-        $jobs = jobs();
-
-        Test::assertCount(1, $jobs);
-        Test::assertArrayHasKey('my-job', $jobs);
-
-        $job = $jobs['my-job'];
-
-        Test::assertSame('0 */5 * * * *', $job['cron']);
-        Test::assertSame('default', $job['queue']);
-        Test::assertSame(1, $job['concurrency']);
-        Test::assertSame(100, $job['priority']);
-        Test::assertSame(3600, $job['lease']);
-        Test::assertSame($handler, $job['handler']);
-        // hasSeconds field removed - all cron expressions are 6-field now
-    });
-
-    Test::it('should use frequency helpers via __call', function () {
-        Job::schedule('daily-job', fn() => null)->daily();
-        Job::schedule('hourly-job', fn() => null)->hourly();
-        Job::schedule('weekly-job', fn() => null)->weekly();
-
-        $jobs = jobs();
-
-        Test::assertSame('0 0 0 * * *', $jobs['daily-job']['cron']);
-        Test::assertSame('0 0 * * * *', $jobs['hourly-job']['cron']);
-        Test::assertSame('0 0 0 * * 0', $jobs['weekly-job']['cron']);
-    });
-
-    Test::it('should modify time with hour() and minute() methods', function () {
-        Job::schedule('daily-at-9am', fn() => null)->daily()->hour(9);
-
-        $job = jobs()['daily-at-9am'];
-
-        Test::assertSame('0 0 9 * * *', $job['cron']);
-    });
-
-    Test::it('should allow explicit cron via cron() method', function () {
-        Job::schedule('custom-job', fn() => null)->cron('*/15 * * * *');
-
-        $job = jobs()['custom-job'];
-
-        Test::assertSame('0 */15 * * * *', $job['cron']);
-    });
-
-    Test::it('should throw exception on duplicate job names', function () {
-        Job::schedule('duplicate', fn() => null)->daily();
-
-        Test::expectException(RuntimeException::class, function () {
-            Job::schedule('duplicate', fn() => null)->hourly();
-        }, "Job 'duplicate' is already defined.");
-    });
-
-    Test::it('should support second-based frequency helpers', function () {
-        Job::schedule('every-second', fn() => null)->everySecond();
-        Job::schedule('every-five-sec', fn() => null)->everyFiveSeconds();
-        Job::schedule('every-thirty-sec', fn() => null)->everyThirtySeconds();
-
-        $jobs = jobs();
-
-        Test::assertSame('* * * * * *', $jobs['every-second']['cron']);
-        Test::assertSame('*/5 * * * * *', $jobs['every-five-sec']['cron']);
-        Test::assertSame('*/30 * * * * *', $jobs['every-thirty-sec']['cron']);
-    });
-
-    Test::it('should modify days of month with day() method', function () {
-        Job::schedule('on-specific-days', fn() => null)
-            ->daily()
-            ->day([1, 15]);
-
-        $job = jobs()['on-specific-days'];
-        Test::assertSame('0 0 0 1,15 * *', $job['cron']);
-    });
-
-    Test::it('should modify months with month() method', function () {
-        Job::schedule('seasonal', fn() => null)
-            ->daily()
-            ->month([3, 6, 9, 12]);  // Quarterly
-
-        $job = jobs()['seasonal'];
-        Test::assertSame('0 0 0 * 3,6,9,12 *', $job['cron']);
-    });
-
-    Test::it('should modify seconds with second() method', function () {
-        Job::schedule('on-specific-seconds', fn() => null)
-            ->everyMinute()
-            ->second([0, 15, 30, 45]);
-
-        $job = jobs()['on-specific-seconds'];
-        Test::assertSame('0,15,30,45 * * * * *', $job['cron']);
-    });
-
-    Test::it('should modify minutes with minute() method', function () {
-        Job::schedule('on-specific-minutes', fn() => null)
-            ->hourly()
-            ->minute([0, 15, 30, 45]);
-
-        $job = jobs()['on-specific-minutes'];
-        Test::assertSame('0 0,15,30,45 * * * *', $job['cron']);
-    });
-
-    Test::it('should modify hours with hour() method', function () {
-        Job::schedule('on-specific-hours', fn() => null)
-            ->daily()
-            ->hour([9, 12, 15, 18]);
-
-        $job = jobs()['on-specific-hours'];
-        Test::assertSame('0 0 9,12,15,18 * * *', $job['cron']);
-    });
-
-    Test::it('should support single values in time constraint methods', function () {
-        Job::schedule('single-second', fn() => null)->everyMinute()->second(30);
-        Job::schedule('single-minute', fn() => null)->hourly()->minute(15);
-        Job::schedule('single-hour', fn() => null)->daily()->hour(9);
-        Job::schedule('single-day', fn() => null)->daily()->day(15);
-        Job::schedule('single-month', fn() => null)->daily()->month(6);
-
-        $jobs = jobs();
-
-        Test::assertSame('30 * * * * *', $jobs['single-second']['cron']);
-        Test::assertSame('0 15 * * * *', $jobs['single-minute']['cron']);
-        Test::assertSame('0 0 9 * * *', $jobs['single-hour']['cron']);
-        Test::assertSame('0 0 0 15 * *', $jobs['single-day']['cron']);
-        Test::assertSame('0 0 0 * 6 *', $jobs['single-month']['cron']);
-    });
-
-    Test::it('should skip execution when skip() returns true', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $executed = false;
-
-        Job::schedule('skippable', function () use (&$executed) {
-            $executed = true;
-        })
-            ->everyMinute()
-            ->skip(fn() => true);  // Always skip
-
-        dispatch($cli, 'jobs:install');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertFalse($executed);
-    });
-
-    Test::it('should execute only when when() returns true', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $executedAllow = false;
-        $executedDeny = false;
-
-        Job::schedule('allowed', function () use (&$executedAllow) {
-            $executedAllow = true;
-        })
-            ->everySecond()  // Use everySecond() to ensure job is due
-            ->when(fn() => true);
-
-        Job::schedule('denied', function () use (&$executedDeny) {
-            $executedDeny = true;
-        })
-            ->everySecond()  // Use everySecond() to ensure job is due
-            ->when(fn() => false);
-
-        dispatch($cli, 'jobs:install');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertTrue($executedAllow);
-        Test::assertFalse($executedDeny);
-    });
-
-    Test::it('should fluent modifiers override defaults', function () {
-        $handler = fn() => null;
-
-        Job::schedule('report.generate', $handler)
-            ->hourly()
-            ->queue('reports')
-            ->concurrency(3)
-            ->priority(5)
-            ->lease(180);
-
-        $job = jobs()['report.generate'];
-
-        Test::assertSame('reports', $job['queue']);
-        Test::assertSame(3, $job['concurrency']);
-        Test::assertSame(5, $job['priority']);
-        Test::assertSame(180, $job['lease']);
-    });
-
-    Test::it('should execute due jobs and update state on run', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $executed = 0;
-
-        Job::schedule('alpha', function () use (&$executed) {
-            $executed++;
-        })->everySecond();  // Use everySecond() to ensure job is due
-
-        dispatch($cli, 'jobs:install');
-        [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:collect');
-
-        Test::assertSame(0, $exitCode);
-        Test::assertStringContainsString('Executed 1 job(s).', $stdout);
-        Test::assertSame('', $stderr);
-        Test::assertSame(1, $executed);
-
-        $row = row($state, 'alpha');
-
-        Test::assertNotNull($row['last_run']);
-        Test::assertSame(0, (int)$row['fail_count']);
-        Test::assertNull($row['last_error']);
-        Test::assertNull($row['lease_until']);
-        Test::assertNotNull($row['seen_at']);
-    });
-
-    Test::it('should skip jobs when concurrency limit reached on run', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $alphaExecuted = false;
-
-        Job::schedule('alpha', function () use (&$alphaExecuted) {
-            $alphaExecuted = true;
-        })
-            ->everyMinute()
-            ->queue('emails')
-            ->concurrency(1);
-
-        Job::schedule('beta', function (): void {
-            Test::fail('The queue already reached the concurrency limit.');
-        })
-            ->everyMinute()
-            ->queue('emails')
-            ->concurrency(1);
-
-        dispatch($cli, 'jobs:install');
-
-        $now = new DateTimeImmutable('now');
-
-        $statement = pdo($state)->prepare('UPDATE jobs SET lease_until = :l WHERE name = :n');
-        $statement->execute([
-            ':l' => $now->modify('+5 minutes')->format('Y-m-d H:i:s'),
-            ':n' => 'alpha',
-        ]);
-
-        [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:collect');
-
-        Test::assertSame(0, $exitCode);
-        Test::assertStringContainsString('No due jobs.', $stdout);
-        Test::assertSame('', $stderr);
-        Test::assertFalse($alphaExecuted);
-
-        $betaRow = row($state, 'beta');
-        Test::assertNull($betaRow['last_run']);
-        Test::assertSame(0, (int)$betaRow['fail_count']);
-    });
-
-    Test::it('should record failures and leave trace on run', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        Job::schedule('failing', function (): void {
-            throw new RuntimeException('boom failure message');
-        })->everySecond();  // Use everySecond() to ensure job is due
-
-        dispatch($cli, 'jobs:install');
-        [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:collect');
-
-        Test::assertSame(0, $exitCode);
-        Test::assertStringContainsString('Executed 1 job(s).', $stdout);
-        Test::assertStringContainsString('boom failure message', $stderr);
-
-        $row = row($state, 'failing');
-
-        Test::assertNotNull($row['last_run']);
-        Test::assertSame('boom failure message', $row['last_error']);
-        Test::assertSame(1, (int)$row['fail_count']);
-        Test::assertNull($row['lease_until']);
-    });
-
-    Test::it('should match cron day combinations correctly', function () {
-        $match = function (string $expr, string $date): bool {
-            $parsed = \Ajo\Core\CronParser::parse($expr);
-
-            return \Ajo\Core\CronEvaluator::matches(
-                $parsed,
-                new DateTimeImmutable($date),
-            );
-        };
-
-        Test::assertTrue($match('0 0 0 1 * 0', '2024-12-01 00:00:00')); // domingo y día 1
-        Test::assertFalse($match('0 0 0 1 * 0', '2024-12-02 00:00:00')); // lunes 2
-        Test::assertTrue($match('0 15 10 * * 3', '2024-05-08 10:15:00'));
-        Test::assertTrue($match('0 15 10 10 * 3', '2024-05-10 10:15:00'));
-        Test::assertFalse($match('0 15 10 10 * 3', '2024-05-09 10:15:00'));
-    });
-
-    Test::it('should evaluate six-field cron once per minute', function () {
-        $parsed = \Ajo\Core\CronParser::parse('0 * * * * *');
-        $moment = new DateTimeImmutable('2024-01-01 12:07:00');
-
-        $first = \Ajo\Core\CronEvaluator::evaluate($parsed, $moment, null);
-        Test::assertTrue($first['due']);
-        Test::assertSame('2024-01-01 12:08:00', $first['next']->format('Y-m-d H:i:s'));
-
-        // Same minute but different second should not be due (second precision)
-        $sameMinute = \Ajo\Core\CronEvaluator::evaluate(
-            $parsed,
-            $moment,
-            new DateTimeImmutable('2024-01-01 12:07:00'),
-        );
-
-        Test::assertFalse($sameMinute['due']);
-    });
-
-    Test::it('should evaluate six-field cron once per second', function () {
-        $parsed = \Ajo\Core\CronParser::parse('*/5 * * * * *');
-        $moment = new DateTimeImmutable('2024-01-01 00:00:10');
-
-        $first = \Ajo\Core\CronEvaluator::evaluate($parsed, $moment, null);
-        Test::assertTrue($first['due']);
-        Test::assertSame('2024-01-01 00:00:15', $first['next']->format('Y-m-d H:i:s'));
-
-        $sameSecond = \Ajo\Core\CronEvaluator::evaluate(
-            $parsed,
-            $moment,
-            new DateTimeImmutable('2024-01-01 00:00:10'),
-        );
-
-        Test::assertFalse($sameSecond['due']);
-    });
-
-    Test::it('should stop when stop called in forever', function () {
-        $cli = Console::create();
-        /** @var CoreJob $jobs */
-        $jobs = Job::register($cli);
-
-        $executed = 0;
-
-        Job::schedule('self.stop', function () use (&$executed, $jobs) {
-            $executed++;
-            $jobs->stop();
-        })->everySecond();  // Use everySecond() to avoid waiting for second 0
-
-        dispatch($cli, 'jobs:install');
-        silence(fn() => $jobs->forever());
-
-        Test::assertSame(1, $executed);
-    });
-
-    Test::it('should reset queue to default when null provided', function () {
-        Job::schedule('test-job', fn() => null)
-            ->everyMinute()
-            ->queue(null);
-
-        $job = jobs()['test-job'];
-        Test::assertSame('default', $job['queue']);
-    });
-
-    Test::it('should enforce minimum duration in lease', function () {
-        Job::schedule('test-job-lease', fn() => null)
-            ->everyMinute()
-            ->lease(10);
-
-        $job = jobs()['test-job-lease'];
-        Test::assertSame(60, $job['lease']);
-    });
-
-    Test::it('should render registered jobs in status command', function () {
-        $cli = Console::create();
-        Job::register($cli);
-
-        Job::schedule('status.job', fn() => null)->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-        [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:status');
-
-        Test::assertSame(0, $exitCode);
-        Test::assertSame('', $stderr);
-        Test::assertStringContainsString('Defined: 1 | Running: 0 | Idle: 1', $stdout);
-        Test::assertStringContainsString('status.job', $stdout);
-    });
-
-    Test::it('should prune unseen jobs', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        Job::schedule('stale.job', fn() => null)->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-        dispatch($cli, 'jobs:collect');
-
-        $pdo = pdo($state);
-        $old = '2000-01-01 00:00:00';
-
-        $update = $pdo->prepare('UPDATE jobs SET seen_at = :old WHERE name = :name');
-        $update->execute([':old' => $old, ':name' => 'stale.job']);
-
-        $pdo->exec("
-            INSERT INTO jobs (name, last_run, lease_until, last_error, fail_count, seen_at, created_at, updated_at)
-            VALUES ('legacy.job', NULL, NULL, NULL, 0, '1990-01-01 00:00:00', '1990-01-01 00:00:00', '1990-01-01 00:00:00')
-        ");
-
-        [$exitCode, $stdout, $stderr] = dispatch($cli, 'jobs:prune');
-
-        Test::assertSame(0, $exitCode);
-        Test::assertSame('', $stderr);
-        Test::assertStringContainsString('Pruned', $stdout);
-
-        $staleCount = $pdo->query("SELECT COUNT(*) FROM jobs WHERE name = 'stale.job'");
-        Test::assertNotFalse($staleCount);
-        Test::assertSame(0, (int)$staleCount->fetchColumn());
-        $staleCount->closeCursor();
-
-        $legacyCount = $pdo->query("SELECT COUNT(*) FROM jobs WHERE name = 'legacy.job'");
-        Test::assertNotFalse($legacyCount);
-        Test::assertSame(0, (int)$legacyCount->fetchColumn());
-        $legacyCount->closeCursor();
-    });
-
-    Test::it('should assume daily when day() or month() used without frequency', function () {
-        Job::schedule('days-only', fn() => null)->day([1, 15]);
-        Job::schedule('months-only', fn() => null)->month([6, 12]);
-        Job::schedule('both', fn() => null)->day(5)->month(3);
-
-        $jobs = jobs();
-
-        // day() should set default daily (0 0 0 * * *) then modify day field
-        Test::assertSame('0 0 0 1,15 * *', $jobs['days-only']['cron']);
-
-        // month() should set default daily then modify month field
-        Test::assertSame('0 0 0 * 6,12 *', $jobs['months-only']['cron']);
-
-        // both should work: first day() sets daily + modifies day, then month() modifies month
-        Test::assertSame('0 0 0 5 3 *', $jobs['both']['cron']);
-    });
-
-    Test::it('should accumulate multiple when() and skip() conditions', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $executed1 = false;
-        $executed2 = false;
-        $executed3 = false;
-        $executed4 = false;
-
-        // Multiple when() - all must return true
-        Job::schedule('multiple-when', function () use (&$executed1) {
-            $executed1 = true;
-        })
-            ->everySecond()  // Use everySecond() to ensure job is due
-            ->queue('q1')
-            ->when(fn() => true)
-            ->when(fn() => true)
-            ->when(fn() => true);
-
-        // Multiple when() - one returns false, should not execute
-        Job::schedule('when-fail', function () use (&$executed2) {
-            $executed2 = true;
-        })
-            ->everySecond()  // Use everySecond() to ensure job is due
-            ->queue('q2')
-            ->when(fn() => true)
-            ->when(fn() => false)  // This one fails
-            ->when(fn() => true);
-
-        // Multiple skip() - any can skip
-        Job::schedule('multiple-skip', function () use (&$executed3) {
-            $executed3 = true;
-        })
-            ->everySecond()  // Use everySecond() to ensure job is due
-            ->queue('q3')
-            ->skip(fn() => false)
-            ->skip(fn() => true)   // This one skips
-            ->skip(fn() => false);
-
-        // Mixing when() and skip()
-        Job::schedule('mixed', function () use (&$executed4) {
-            $executed4 = true;
-        })
-            ->everySecond()  // Use everySecond() to ensure job is due
-            ->queue('q4')
-            ->when(fn() => true)
-            ->skip(fn() => false)
-            ->when(fn() => true);
-
-        dispatch($cli, 'jobs:install');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertTrue($executed1, 'All when() conditions pass');
-        Test::assertFalse($executed2, 'One when() fails');
-        Test::assertFalse($executed3, 'One skip() returns true');
-        Test::assertTrue($executed4, 'Mixed when/skip, all pass');
-    });
-
-    Test::it('should execute dispatched job immediately', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $executed = false;
-
-        Job::schedule('test-dispatch', function () use (&$executed) {
-            $executed = true;
-        })->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch the job (enqueue it)
-        Job::dispatch('test-dispatch');
-
-        // Run should execute it immediately
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertTrue($executed, 'Dispatched job should execute immediately');
-    });
-
-    Test::it('should execute ad-hoc dispatched job with handler', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $executed = false;
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch ad-hoc job (not previously scheduled)
-        Job::dispatch('ad-hoc-job', function () use (&$executed) {
-            $executed = true;
-        });
-
-        // Run should execute it
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertTrue($executed, 'Ad-hoc dispatched job should execute');
-    });
-
-    Test::it('should throw exception when dispatching non-existent job without handler', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        dispatch($cli, 'jobs:install');
-
-        $thrown = false;
-
-        try {
-            Job::dispatch('non-existent');
-        } catch (RuntimeException $e) {
-            $thrown = true;
-            Test::assertContains('not found', $e->getMessage());
-        }
-
-        Test::assertTrue($thrown, 'Should throw exception for non-existent job');
-    });
-
-    Test::it('should reset enqueued_at after execution', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $count = 0;
-
-        Job::schedule('test-reset', function () use (&$count) {
-            $count++;
-        })->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch and execute
-        Job::dispatch('test-reset');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertEquals(1, $count, 'Should execute once');
-
-        // Dispatch again - if enqueued_at was properly reset, it should execute again
-        Job::dispatch('test-reset');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertEquals(2, $count, 'Should execute again after re-dispatch (enqueued_at was reset)');
-    });
-
-    Test::it('should allow multiple dispatches of same job', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $count = 0;
-
-        Job::schedule('multi-dispatch', function () use (&$count) {
-            $count++;
-        })->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch 3 times (only last one will execute since they override enqueued_at)
-        Job::dispatch('multi-dispatch');
-        Job::dispatch('multi-dispatch');
-        Job::dispatch('multi-dispatch');
-
-        // Execute
-        dispatch($cli, 'jobs:collect');
-
-        // Should execute only once (latest dispatch)
-        Test::assertEquals(1, $count, 'Should execute once per run');
-
-        // Dispatch again after execution
-        Job::dispatch('multi-dispatch');
-        dispatch($cli, 'jobs:collect');
-
-        // Should execute again
-        Test::assertEquals(2, $count, 'Should execute again after re-dispatch');
-    });
-
-    Test::it('should execute onBefore hook before handler', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $order = [];
-
-        Job::schedule('test-before', function () use (&$order) {
-            $order[] = 'handler';
-        })
-            ->everyMinute()
-            ->onBefore(function () use (&$order) {
-                $order[] = 'before';
-            });
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch to execute immediately
-        Job::dispatch('test-before');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertEquals(['before', 'handler'], $order, 'onBefore should execute before handler');
-    });
-
-    Test::it('should execute onSuccess hook after successful handler', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $order = [];
-
-        Job::schedule('test-success', function () use (&$order) {
-            $order[] = 'handler';
-        })
-            ->everyMinute()
-            ->onSuccess(function () use (&$order) {
-                $order[] = 'success';
-            });
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('test-success');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertEquals(['handler', 'success'], $order, 'onSuccess should execute after handler');
-    });
-
-    Test::it('should execute onError hook when handler throws exception', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $errorCaught = null;
-
-        Job::schedule('test-error', function () {
-            throw new RuntimeException('Test error');
-        })
-            ->everyMinute()
-            ->onError(function (Throwable $e) use (&$errorCaught) {
-                $errorCaught = $e->getMessage();
-            });
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('test-error');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertEquals('Test error', $errorCaught, 'onError should receive exception');
-    });
-
-    Test::it('should execute onAfter hook always (success case)', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $afterExecuted = false;
-
-        Job::schedule('test-after-success', fn() => null)
-            ->everyMinute()
-            ->onAfter(function () use (&$afterExecuted) {
-                $afterExecuted = true;
-            });
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('test-after-success');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertTrue($afterExecuted, 'onAfter should execute on success');
-    });
-
-    Test::it('should execute onAfter hook always (error case)', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $afterExecuted = false;
-
-        Job::schedule('test-after-error', function () {
-            throw new RuntimeException('Error');
-        })
-            ->everyMinute()
-            ->onAfter(function () use (&$afterExecuted) {
-                $afterExecuted = true;
-            });
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('test-after-error');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertTrue($afterExecuted, 'onAfter should execute even on error');
-    });
-
-    Test::it('should execute all hooks in correct order', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $order = [];
-
-        Job::schedule('test-hooks-order', function () use (&$order) {
-            $order[] = 'handler';
-        })
-            ->everyMinute()
-            ->onBefore(function () use (&$order) {
-                $order[] = 'before';
-            })
-            ->onSuccess(function () use (&$order) {
-                $order[] = 'success';
-            })
-            ->onAfter(function () use (&$order) {
-                $order[] = 'after';
-            });
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('test-hooks-order');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertEquals(['before', 'handler', 'success', 'after'], $order, 'Hooks should execute in correct order');
-    });
-
-    Test::it('should allow multiple hooks of same type', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $count = 0;
-
-        Job::schedule('test-multiple-hooks', fn() => null)
-            ->everyMinute()
-            ->onBefore(function () use (&$count) {
-                $count++;
-            })
-            ->onBefore(function () use (&$count) {
-                $count++;
-            })
-            ->onBefore(function () use (&$count) {
-                $count++;
-            });
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('test-multiple-hooks');
-        dispatch($cli, 'jobs:collect');
-
-        Test::assertEquals(3, $count, 'All hooks of same type should execute');
-    });
-
-    // RETRIES WITH BACKOFF TESTS =============================================
-
-    Test::it('should retry failed job up to max attempts', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $attempts = 0;
-
-        Job::schedule('retry-job', function () use (&$attempts) {
-            $attempts++;
-            throw new RuntimeException('Simulated failure');
-        })
-            ->everyMinute()
-            ->retries(3)
-            ->backoff(0); // No delay for test speed
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('retry-job');
-
-        // First attempt
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(1, $attempts, 'Should execute first attempt');
-
-        $jobRow = row($state, 'retry-job');
-        Test::assertEquals(1, (int)$jobRow['fail_count'], 'Should increment fail_count');
-        Test::assertNotNull($jobRow['enqueued_at'], 'Should re-enqueue for retry');
-
-        // Second attempt
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(2, $attempts, 'Should execute second attempt');
-
-        $jobRow = row($state, 'retry-job');
-        Test::assertEquals(2, (int)$jobRow['fail_count']);
-        Test::assertNotNull($jobRow['enqueued_at'], 'Should re-enqueue for retry');
-
-        // Third attempt (final)
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(3, $attempts, 'Should execute third attempt');
-
-        $jobRow = row($state, 'retry-job');
-        Test::assertEquals(3, (int)$jobRow['fail_count']);
-        Test::assertNull($jobRow['enqueued_at'], 'Should NOT re-enqueue after max attempts');
-
-        // Should not execute again
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(3, $attempts, 'Should not execute beyond max attempts');
-    });
-
-    Test::it('should reset fail_count on success after retries', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $attempts = 0;
-
-        Job::schedule('eventually-succeeds', function () use (&$attempts) {
-            $attempts++;
-            if ($attempts < 3) {
-                throw new RuntimeException('Retry me');
-            }
-            // Success on 3rd attempt
-        })
-            ->everyMinute()
-            ->retries(5)
-            ->backoff(0);
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('eventually-succeeds');
-
-        // First attempt - fails
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(1, $attempts);
-        Test::assertEquals(1, (int)row($state, 'eventually-succeeds')['fail_count']);
-
-        // Second attempt - fails
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(2, $attempts);
-        Test::assertEquals(2, (int)row($state, 'eventually-succeeds')['fail_count']);
-
-        // Third attempt - succeeds
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(3, $attempts);
-
-        $jobRow = row($state, 'eventually-succeeds');
-        Test::assertEquals(0, (int)$jobRow['fail_count'], 'Should reset fail_count on success');
-        Test::assertNull($jobRow['last_error'], 'Should clear error on success');
-        Test::assertNull($jobRow['enqueued_at'], 'Should clear enqueued_at on success');
-    });
-
-    Test::it('should apply linear backoff between retries', function ($state) {
-        $cli = Console::create();
-        $clock = new ManualClock('2024-01-01 12:00:00');
-        $jobs = new \Ajo\Core\Job($clock);
-        Job::swap($jobs);
-
-        $jobs->register($cli);
-
-        $jobs->schedule('backoff-job', function () {
-            throw new RuntimeException('Always fails');
-        })
-            ->everyMinute()
-            ->retries(4)
-            ->backoff(60); // 60 seconds per attempt
-
-        dispatch($cli, 'jobs:install');
-        $jobs->dispatch('backoff-job');
-
-        // First failure (attempt 1)
-        silence(fn() => $jobs->run());
-        $jobRow = row($state, 'backoff-job');
-        Test::assertEquals(1, (int)$jobRow['fail_count']);
-        // Next retry should be at: now + (60 * 1) = 12:01:00
-        Test::assertEquals('2024-01-01 12:01:00', $jobRow['enqueued_at'], 'First retry: 60s delay');
-
-        // Advance time to retry moment
-        $clock->setNow('2024-01-01 12:01:00');
-
-        // Second failure (attempt 2)
-        silence(fn() => $jobs->run());
-        $jobRow = row($state, 'backoff-job');
-        Test::assertEquals(2, (int)$jobRow['fail_count']);
-        // Next retry should be at: now + (60 * 2) = 12:03:00
-        Test::assertEquals('2024-01-01 12:03:00', $jobRow['enqueued_at'], 'Second retry: 120s delay');
-
-        // Advance time to next retry
-        $clock->setNow('2024-01-01 12:03:00');
-
-        // Third failure (attempt 3)
-        silence(fn() => $jobs->run());
-        $jobRow = row($state, 'backoff-job');
-        Test::assertEquals(3, (int)$jobRow['fail_count']);
-        // Next retry should be at: now + (60 * 3) = 12:06:00
-        Test::assertEquals('2024-01-01 12:06:00', $jobRow['enqueued_at'], 'Third retry: 180s delay');
-    });
-
-    Test::it('should not retry if retries is set to 1 (default)', function ($state) {
-        $cli = Console::create();
-        Job::register($cli);
-
-        $attempts = 0;
-
-        Job::schedule('no-retry', function () use (&$attempts) {
-            $attempts++;
-            throw new RuntimeException('Fail once');
-        })->everyMinute(); // No retries() call - defaults to 1
-
-        dispatch($cli, 'jobs:install');
-        Job::dispatch('no-retry');
-
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(1, $attempts, 'Should execute once');
-
-        $jobRow = row($state, 'no-retry');
-        Test::assertEquals(1, (int)$jobRow['fail_count']);
-        Test::assertNull($jobRow['enqueued_at'], 'Should NOT re-enqueue with default retries=1');
-
-        // Should not execute again
-        dispatch($cli, 'jobs:collect');
-        Test::assertEquals(1, $attempts, 'Should not retry');
-    });
-
-    // DELAYED DISPATCH TESTS =================================================
-
-    Test::it('should dispatch job with delay using dispatch parameter', function ($state) {
-        $cli = Console::create();
-        $clock = new ManualClock('2024-01-01 10:00:00');
-        $jobs = new \Ajo\Core\Job($clock);
-        Job::swap($jobs);
-
-        $jobs->register($cli);
-
-        $jobs->schedule('delayed-job', fn() => null)->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch with 300 second (5 minute) delay
-        $jobs->dispatch('delayed-job', null, 300);
-
-        $jobRow = row($state, 'delayed-job');
-        Test::assertEquals('2024-01-01 10:05:00', $jobRow['enqueued_at'], 'Should set enqueued_at 5 minutes in future');
-    });
-
-    Test::it('should dispatch job with delay using delay() method', function ($state) {
-        $cli = Console::create();
-        $clock = new ManualClock('2024-01-01 14:30:00');
-        $jobs = new \Ajo\Core\Job($clock);
-        Job::swap($jobs);
-
-        $jobs->register($cli);
-
-        $jobs->schedule('delayed-chain', fn() => null)->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch with delay using chain method
-        $jobs->delay(3600)->dispatch('delayed-chain'); // 1 hour delay
-
-        $jobRow = row($state, 'delayed-chain');
-        Test::assertEquals('2024-01-01 15:30:00', $jobRow['enqueued_at'], 'Should set enqueued_at 1 hour in future');
-    });
-
-    Test::it('should not execute delayed job before delay expires', function ($state) {
-        $cli = Console::create();
-        $clock = new ManualClock('2024-01-01 09:00:00');
-        $jobs = new \Ajo\Core\Job($clock);
-        Job::swap($jobs);
-
-        $jobs->register($cli);
-
-        $executed = false;
-
-        $jobs->schedule('wait-job', function () use (&$executed) {
-            $executed = true;
-        })->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch with 10 minute delay
-        $jobs->dispatch('wait-job', null, 600);
-
-        // Try to execute immediately - should not run
-        silence(fn() => $jobs->run());
-        Test::assertFalse($executed, 'Should not execute before delay expires');
-
-        // Advance time but not enough
-        $clock->setNow('2024-01-01 09:05:00');
-        silence(fn() => $jobs->run());
-        Test::assertFalse($executed, 'Should not execute before full delay');
-
-        // Advance to exactly when it should run
-        $clock->setNow('2024-01-01 09:10:00');
-        silence(fn() => $jobs->run());
-        Test::assertTrue($executed, 'Should execute once delay expires');
-    });
-
-    Test::it('should execute delayed job after delay expires', function ($state) {
-        $cli = Console::create();
-        $clock = new ManualClock('2024-01-01 20:00:00');
-        $jobs = new \Ajo\Core\Job($clock);
-        Job::swap($jobs);
-
-        $jobs->register($cli);
-
-        $executed = false;
-
-        $jobs->schedule('future-job', function () use (&$executed) {
-            $executed = true;
-        })->everyMinute();
-
-        dispatch($cli, 'jobs:install');
-
-        $jobs->delay(120)->dispatch('future-job'); // 2 minutes
-
-        // Advance past the delay
-        $clock->setNow('2024-01-01 20:03:00');
-
-        silence(fn() => $jobs->run());
-        Test::assertTrue($executed, 'Should execute after delay has passed');
-    });
-
-    Test::it('should support retries combined with delay', function ($state) {
-        $cli = Console::create();
-        $clock = new ManualClock('2024-01-01 08:00:00');
-        $jobs = new \Ajo\Core\Job($clock);
-        Job::swap($jobs);
-
-        $jobs->register($cli);
-
-        $attempts = 0;
-
-        $jobs->schedule('delayed-retry', function () use (&$attempts) {
-            $attempts++;
-            throw new RuntimeException('Always fail');
-        })
-            ->everyMinute()
-            ->retries(3)
-            ->backoff(30); // 30s backoff
-
-        dispatch($cli, 'jobs:install');
-
-        // Dispatch with initial 60 second delay
-        $jobs->dispatch('delayed-retry', null, 60);
-
-        // Should not execute before initial delay
-        silence(fn() => $jobs->run());
-        Test::assertEquals(0, $attempts, 'Should not execute before initial delay');
-
-        // Advance to when initial delay expires
-        $clock->setNow('2024-01-01 08:01:00');
-
-        // First attempt (fails)
-        silence(fn() => $jobs->run());
-        Test::assertEquals(1, $attempts);
-
-        $jobRow = row($state, 'delayed-retry');
-        Test::assertEquals(1, (int)$jobRow['fail_count']);
-        // Should schedule retry with backoff: 08:01:00 + 30s = 08:01:30
-        Test::assertEquals('2024-01-01 08:01:30', $jobRow['enqueued_at'], 'Should apply backoff after failure');
-
-        // Advance to retry time
-        $clock->setNow('2024-01-01 08:01:30');
-
-        // Second attempt (fails)
-        silence(fn() => $jobs->run());
-        Test::assertEquals(2, $attempts);
-
-        $jobRow = row($state, 'delayed-retry');
-        Test::assertEquals(2, (int)$jobRow['fail_count']);
-        // Should schedule retry with backoff: 08:01:30 + 60s = 08:02:30
-        Test::assertEquals('2024-01-01 08:02:30', $jobRow['enqueued_at'], 'Should apply progressive backoff');
-    });
-
-    Test::it('should execute ad-hoc delayed job', function ($state) {
-        $cli = Console::create();
-        $clock = new ManualClock('2024-01-01 16:00:00');
-        $jobs = new \Ajo\Core\Job($clock);
-        Job::swap($jobs);
-
-        $jobs->register($cli);
-
-        $executed = false;
-
-        dispatch($cli, 'jobs:install');
-
-        // Ad-hoc job with delay
-        $jobs->dispatch('adhoc-delayed', function () use (&$executed) {
-            $executed = true;
-        }, 180); // 3 minutes
-
-        $jobRow = row($state, 'adhoc-delayed');
-        Test::assertEquals('2024-01-01 16:03:00', $jobRow['enqueued_at']);
-
-        // Should not execute before delay
-        silence(fn() => $jobs->run());
-        Test::assertFalse($executed);
-
-        // Execute after delay
-        $clock->setNow('2024-01-01 16:03:00');
-        silence(fn() => $jobs->run());
-        Test::assertTrue($executed, 'Should execute ad-hoc delayed job');
-    });
-});
-
-/**
- * @return array<string, array{
- *     cron: ?string,
- *     queue: string,
- *     concurrency: int,
- *     priority: int,
- *     lease: int,
- *     handler: callable,
- *     parsed: ?array
- * }>
- */
-function jobs(): array
+use ReflectionClass;
+use PDO;
+
+// Force autoload JobCore to make Cron and Clock available
+class_exists(\Ajo\JobCore::class);
+
+use Ajo\Test;
+use Ajo\JobCore as Job;
+use Ajo\Cron;
+use Ajo\Clock;
+use Ajo\Database;
+
+// ============================================================================
+// Test Clock for deterministic time control
+// ============================================================================
+
+final class FakeClock implements Clock
 {
-    $instance = jobsInstance();
+    private DateTimeImmutable $now;
 
-    $reflection = new ReflectionClass(CoreJob::class);
-    $property = $reflection->getProperty('jobs');
-    $property->setAccessible(true);
-
-    /** @var array<string, array{cron:?string,queue:string,concurrency:int,priority:int,lease:int,handler:callable,parsed:?array}> $jobs */
-    $jobs = $property->getValue($instance);
-
-    return $jobs;
-}
-
-function jobsInstance(): CoreJob
-{
-    $instance = Job::instance();
-
-    if (!$instance instanceof CoreJob) {
-        Test::fail('Jobs instance is not available.');
-    }
-
-    return $instance;
-}
-
-function resetSingleton(): void
-{
-    Job::swap(new CoreJob());
-}
-
-function callPrivate(object $instance, string $method, mixed ...$args): mixed
-{
-    $closure = \Closure::bind(function () use ($method, $args) {
-        /** @phpstan-ignore-next-line */
-        return $this->{$method}(...$args);
-    }, $instance, $instance);
-
-    if (!$closure instanceof \Closure) {
-        Test::fail('Could not invoke private method.');
-    }
-
-    return $closure();
-}
-
-/**
- * @return array{name:?string,lease_until:?string,last_run:?string,last_error:?string,fail_count:int,seen_at:?string,created_at:?string,updated_at:?string}
- */
-function row($state, string $name): array
-{
-    $statement = pdo($state)->prepare('SELECT * FROM jobs WHERE name = :n');
-    $statement->execute([':n' => $name]);
-
-    $row = $statement->fetch();
-    $statement->closeCursor();
-
-    if ($row === false) {
-        return [
-            'name' => $name,
-            'lease_until' => null,
-            'last_run' => null,
-            'last_error' => null,
-            'fail_count' => 0,
-            'seen_at' => null,
-            'created_at' => null,
-            'updated_at' => null,
-        ];
-    }
-
-    return $row;
-}
-
-function pdo($state): PDO
-{
-    $pdo = $state['pdo'] ?? null;
-
-    if (!$pdo instanceof PDO) {
-        Test::fail('PDO connection is not available.');
-    }
-
-    return $pdo;
-}
-
-/**
- * Manual clock for testing time-dependent behavior
- */
-final class ManualClock implements \Ajo\Core\ClockInterface
-{
-    private DateTimeImmutable $current;
-
-    public function __construct(string $initialTime)
+    public function __construct(?DateTimeImmutable $now = null)
     {
-        $this->current = new DateTimeImmutable($initialTime);
+        $this->now = $now ?? new DateTimeImmutable('2025-01-15 10:30:45');
     }
 
     public function now(): DateTimeImmutable
     {
-        return $this->current;
+        return $this->now;
     }
 
-    public function setNow(string $time): void
+    public function setNow(DateTimeImmutable $time): void
     {
-        $this->current = new DateTimeImmutable($time);
+        $this->now = $time;
     }
 
-    public function advance(int $seconds): void
+    public function advance(string $interval): void
     {
-        $this->current = $this->current->modify("+{$seconds} seconds");
+        $this->now = $this->now->modify($interval);
     }
 }
 
-/**
- * Allows executing MySQL-intended SQL over SQLite during tests.
- */
-final class MysqlForSqlitePDO extends PDO
-{
-    public function __construct()
-    {
-        parent::__construct('sqlite::memory:');
-        $this->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $this->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    }
+Test::suite('Job Unit Tests', function () {
 
-    public function exec(string $statement): int|false
-    {
-        return parent::exec($this->rewrite($statement));
-    }
+    Test::beforeEach(function ($state) {
+        $pdo = Database::get();
+        // Use PID to ensure unique table names across parallel processes
+        $table = 'jobs_test_' . getmypid() . '_' . bin2hex(random_bytes(4));
+        $job = new Job($pdo, new FakeClock(), $table);
+        $job->install();
 
-    public function prepare(string $query, array $options = []): PDOStatement|false
-    {
-        return parent::prepare($this->rewrite($query), $options);
-    }
+        $state['pdo'] = $pdo;
+        $state['table'] = $table;
+    });
 
-    public function query(string $query, ?int $fetchMode = null, ...$fetchModeArgs): PDOStatement|false
-    {
-        $query = $this->rewrite($query);
+    Test::afterEach(function ($state) {
+        $state['pdo']->exec("DROP TABLE IF EXISTS `{$state['table']}`");
+    });
 
-        return $fetchMode === null
-            ? parent::query($query)
-            : parent::query($query, $fetchMode, ...$fetchModeArgs);
-    }
+    // ========================================================================
+    // Cron Parsing
+    // ========================================================================
 
-    private function rewrite(string $sql): string
-    {
-        $normalized = ltrim($sql);
-        $upper = strtoupper($normalized);
+    Test::case('parses 5 and 6 field cron expressions', function () {
+        // 5 fields normalized to 6 (prepend 0) - this is done by Job::cron()
+        // but we test Cron2::parse() directly with 6 fields
+        $cron5Normalized = Cron::parse('0 */15 * * * *'); // Simulating what Job::cron() does
+        Test::assertEquals([0], $cron5Normalized['sec']['list']);
+        Test::assertEquals(range(0, 59, 15), $cron5Normalized['min']['list']);
 
-        if (str_starts_with($upper, 'CREATE TABLE IF NOT EXISTS JOBS')) {
-            return <<<SQL
-CREATE TABLE IF NOT EXISTS jobs (
-    name TEXT PRIMARY KEY,
-    last_run TEXT NULL,
-    lease_until TEXT NULL,
-    last_error TEXT NULL,
-    fail_count INTEGER NOT NULL DEFAULT 0,
-    seen_at TEXT NULL,
-    priority INTEGER NOT NULL DEFAULT 100,
-    enqueued_at TEXT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-SQL;
+        // 6 fields should parse directly
+        $cron6 = Cron::parse('*/10 */15 * * * *');
+        Test::assertEquals(range(0, 59, 10), $cron6['sec']['list']);
+        Test::assertEquals(range(0, 59, 15), $cron6['min']['list']);
+
+        // DOW normalization: 7 -> 0 (Sunday)
+        $cronDow7 = Cron::parse('0 0 0 * * 7');
+        Test::assertContains(0, $cronDow7['dow']['list']);
+        Test::assertFalse(in_array(7, $cronDow7['dow']['list'], true), 'DOW 7 should be normalized to 0');
+    });
+
+    Test::case('supports ranges, steps, and lists in cron expressions', function () {
+        // Range with step: 1-10/2 -> 1,3,5,7,9
+        $cron = Cron::parse('0 1-10/2 * * * *');
+        Test::assertEquals([1, 3, 5, 7, 9], $cron['min']['list']);
+
+        // List: 1,2,40
+        $cron = Cron::parse('0 1,2,40 * * * *');
+        Test::assertEquals([1, 2, 40], $cron['min']['list']);
+
+        // Step from *: */5 -> 0,5,10,...55
+        $cron = Cron::parse('*/5 * * * * *');
+        Test::assertEquals(range(0, 59, 5), $cron['sec']['list']);
+
+        // No duplicates and sorted
+        $cron = Cron::parse('0 5,1,5,3,1 * * * *');
+        Test::assertEquals([1, 3, 5], $cron['min']['list']);
+    });
+
+    Test::case('handles DOM vs DOW semantics correctly', function () {
+        // Both * -> always match (when sec/min/hour/mon match)
+        $cronBothStar = Cron::parse('0 0 0 * * *');
+        Test::assertTrue($cronBothStar['domStar']);
+        Test::assertTrue($cronBothStar['dowStar']);
+
+        $timestamp = new DateTimeImmutable('2025-01-15 00:00:00'); // Wednesday
+        Test::assertTrue(Cron::matches($cronBothStar, $timestamp));
+
+        // Only DOM specified (DOW is *) -> match by DOM only
+        $cronDom15 = Cron::parse('0 0 0 15 * *');
+        Test::assertFalse($cronDom15['domStar']);
+        Test::assertTrue($cronDom15['dowStar']);
+        Test::assertTrue(Cron::matches($cronDom15, new DateTimeImmutable('2025-01-15 00:00:00')));
+        Test::assertFalse(Cron::matches($cronDom15, new DateTimeImmutable('2025-01-16 00:00:00')));
+
+        // Only DOW specified (DOM is *) -> match by DOW only
+        $cronWed = Cron::parse('0 0 0 * * 3'); // Wednesday
+        Test::assertTrue($cronWed['domStar']);
+        Test::assertFalse($cronWed['dowStar']);
+        Test::assertTrue(Cron::matches($cronWed, new DateTimeImmutable('2025-01-15 00:00:00'))); // Wed
+        Test::assertFalse(Cron::matches($cronWed, new DateTimeImmutable('2025-01-16 00:00:00'))); // Thu
+
+        // Both specified -> DOM OR DOW
+        $cronBoth = Cron::parse('0 0 0 1 * 1'); // 1st of month OR Monday
+        Test::assertFalse($cronBoth['domStar']);
+        Test::assertFalse($cronBoth['dowStar']);
+        Test::assertTrue(Cron::matches($cronBoth, new DateTimeImmutable('2025-01-01 00:00:00'))); // 1st (Thu)
+        Test::assertTrue(Cron::matches($cronBoth, new DateTimeImmutable('2025-01-06 00:00:00'))); // Monday (6th)
+        Test::assertFalse(Cron::matches($cronBoth, new DateTimeImmutable('2025-01-07 00:00:00'))); // 7th (Tue)
+    });
+
+    Test::case('advances nextMatch across month boundaries', function () {
+        // Monthly: 0 0 0 1 * * (first day of each month at midnight)
+        $cronMonthly = Cron::parse('0 0 0 1 * *');
+
+        $from = new DateTimeImmutable('2025-01-31 23:59:59');
+        $next = Cron::nextMatch($cronMonthly, $from);
+
+        Test::assertEquals('2025-02-01 00:00:00', $next->format('Y-m-d H:i:s'));
+
+        // From February (28 days) to March
+        $from = new DateTimeImmutable('2025-02-28 23:59:59');
+        $next = Cron::nextMatch($cronMonthly, $from);
+
+        Test::assertEquals('2025-03-01 00:00:00', $next->format('Y-m-d H:i:s'));
+
+        // Test 5-year overflow protection
+        $cronNever = Cron::parse('0 0 0 31 2 *'); // Feb 31 (never exists)
+
+        try {
+            Cron::nextMatch($cronNever, new DateTimeImmutable('2025-01-01 00:00:00'));
+            Test::assertTrue(false, 'Should have thrown RuntimeException');
+        } catch (RuntimeException $e) {
+            Test::assertStringContainsString('overflow', $e->getMessage());
+        }
+    });
+
+    // ========================================================================
+    // Cron Matching
+    // ========================================================================
+
+    Test::case('matches with second precision', function () {
+        $cron = Cron::parse('*/5 * * * * *'); // Every 5 seconds
+
+        Test::assertTrue(Cron::matches($cron, new DateTimeImmutable('2025-01-15 10:30:00')));
+        Test::assertTrue(Cron::matches($cron, new DateTimeImmutable('2025-01-15 10:30:05')));
+        Test::assertTrue(Cron::matches($cron, new DateTimeImmutable('2025-01-15 10:30:10')));
+
+        Test::assertFalse(Cron::matches($cron, new DateTimeImmutable('2025-01-15 10:30:01')));
+        Test::assertFalse(Cron::matches($cron, new DateTimeImmutable('2025-01-15 10:30:03')));
+    });
+
+    Test::case('uses nextMatch to find next occurrence', function () {
+        $cronEvery10Sec = Cron::parse('*/10 * * * * *');
+
+        $from = new DateTimeImmutable('2025-01-15 10:30:07');
+        $next = Cron::nextMatch($cronEvery10Sec, $from);
+
+        Test::assertEquals('2025-01-15 10:30:10', $next->format('Y-m-d H:i:s'));
+
+        // Next after that
+        $next2 = Cron::nextMatch($cronEvery10Sec, $next);
+        Test::assertEquals('2025-01-15 10:30:20', $next2->format('Y-m-d H:i:s'));
+    });
+
+    Test::case('matches complex time patterns', function () {
+        // Weekdays at 9am
+        $cronWeekdays9am = Cron::parse('0 0 9 * * 1-5');
+
+        Test::assertTrue(Cron::matches($cronWeekdays9am, new DateTimeImmutable('2025-01-13 09:00:00'))); // Mon
+        Test::assertTrue(Cron::matches($cronWeekdays9am, new DateTimeImmutable('2025-01-17 09:00:00'))); // Fri
+        Test::assertFalse(Cron::matches($cronWeekdays9am, new DateTimeImmutable('2025-01-18 09:00:00'))); // Sat
+        Test::assertFalse(Cron::matches($cronWeekdays9am, new DateTimeImmutable('2025-01-13 10:00:00'))); // Mon 10am
+    });
+
+    Test::case('handles edge cases in matching', function () {
+        // Last second of the year
+        $cronEverySecond = Cron::parse('* * * * * *');
+        Test::assertTrue(Cron::matches($cronEverySecond, new DateTimeImmutable('2024-12-31 23:59:59')));
+
+        // First second of the year
+        Test::assertTrue(Cron::matches($cronEverySecond, new DateTimeImmutable('2025-01-01 00:00:00')));
+
+        // Leap year Feb 29
+        $cronFeb29 = Cron::parse('0 0 0 29 2 *');
+        Test::assertTrue(Cron::matches($cronFeb29, new DateTimeImmutable('2024-02-29 00:00:00'))); // 2024 is leap
+        Test::assertFalse(Cron::matches($cronFeb29, new DateTimeImmutable('2025-02-28 00:00:00'))); // 2025 not leap
+    });
+
+    // ========================================================================
+    // DSL & Job Definition
+    // ========================================================================
+
+    Test::case('schedule same name twice switches focus', function ($state) {
+        $job = new Job($state['pdo'], new FakeClock(new DateTimeImmutable('2025-01-15 10:30:45')), $state['table']);
+
+        // First schedule
+        $job->schedule('test-job', fn() => 'first');
+
+        // Second schedule with same name - should switch focus, not error
+        $job->schedule('test-job', fn() => 'second');
+
+        // Use reflection to verify the job exists and task was updated
+        $reflection = new ReflectionClass($job);
+        $jobsProperty = $reflection->getProperty('jobs');
+        $jobsProperty->setAccessible(true);
+        $jobs = $jobsProperty->getValue($job);
+
+        Test::assertArrayHasKey('test-job', $jobs);
+        Test::assertNotNull($jobs['test-job']['task']);
+
+        // Task should be updated to the second one
+        Test::assertEquals('second', ($jobs['test-job']['task'])());
+    });
+
+    Test::case('fluent modifiers override defaults', function ($state) {
+        $job = new Job($state['pdo'], new FakeClock(), $state['table']);
+
+        $handler = fn() => null;
+        $job->schedule('custom-job', $handler)
+            ->queue('high-priority')
+            ->priority(50)
+            ->lease(120)
+            ->concurrency(5)
+            ->retries(3, 2, 120, 'full');
+
+        // Use reflection to access private $jobs property
+        $reflection = new ReflectionClass($job);
+        $jobsProperty = $reflection->getProperty('jobs');
+        $jobsProperty->setAccessible(true);
+        $jobs = $jobsProperty->getValue($job);
+
+        Test::assertArrayHasKey('custom-job', $jobs);
+        $jobDef = $jobs['custom-job'];
+
+        Test::assertEquals('high-priority', $jobDef['queue']);
+        Test::assertEquals(50, $jobDef['priority']);
+        Test::assertEquals(120, $jobDef['lease']);
+        Test::assertEquals(5, $jobDef['concurrency']);
+        Test::assertEquals(3, $jobDef['maxAttempts']);
+        Test::assertEquals(2, $jobDef['backoffBase']);
+        Test::assertEquals(120, $jobDef['backoffCap']);
+        Test::assertEquals('full', $jobDef['jitter']);
+    });
+
+    Test::case('cron helpers map to correct expressions', function ($state) {
+        $job = new Job($state['pdo'], new FakeClock(), $state['table']);
+
+        $job->schedule('every-second', fn() => null)->everySecond();
+        $job->schedule('every-five-seconds', fn() => null)->everyFiveSeconds();
+        $job->schedule('every-minute', fn() => null)->everyMinute();
+        $job->schedule('hourly', fn() => null)->hourly();
+        $job->schedule('daily', fn() => null)->daily();
+        $job->schedule('weekly', fn() => null)->weekly();
+        $job->schedule('weekdays', fn() => null)->weekdays();
+        $job->schedule('mondays', fn() => null)->mondays();
+
+        $reflection = new ReflectionClass($job);
+        $jobsProperty = $reflection->getProperty('jobs');
+        $jobsProperty->setAccessible(true);
+        $jobs = $jobsProperty->getValue($job);
+
+        Test::assertEquals('* * * * * *', $jobs['every-second']['cron']);
+        Test::assertEquals('*/5 * * * * *', $jobs['every-five-seconds']['cron']);
+        Test::assertEquals('0 * * * * *', $jobs['every-minute']['cron']);
+        Test::assertEquals('0 0 * * * *', $jobs['hourly']['cron']);
+        Test::assertEquals('0 0 0 * * *', $jobs['daily']['cron']);
+        Test::assertEquals('0 0 0 * * 0', $jobs['weekly']['cron']);
+        Test::assertEquals('0 0 0 * * 1-5', $jobs['weekdays']['cron']);
+        Test::assertEquals('0 0 0 * * 1', $jobs['mondays']['cron']);
+    });
+
+    Test::case('time limiters modify cron fields', function ($state) {
+        $job = new Job($state['pdo'], new FakeClock(), $state['table']);
+
+        $job->schedule('daily-at-9am', fn() => null)
+            ->daily()
+            ->hours(9)
+            ->minutes(30)
+            ->seconds(15);
+
+        $reflection = new ReflectionClass($job);
+        $jobsProperty = $reflection->getProperty('jobs');
+        $jobsProperty->setAccessible(true);
+        $jobs = $jobsProperty->getValue($job);
+
+        Test::assertEquals('15 30 9 * * *', $jobs['daily-at-9am']['cron']);
+
+        // Test with arrays
+        $job->schedule('multi-times', fn() => null)
+            ->everyMinute()
+            ->seconds([0, 15, 30, 45]);
+
+        $jobs = $jobsProperty->getValue($job);
+        Test::assertEquals('0,15,30,45 * * * * *', $jobs['multi-times']['cron']);
+    });
+
+    // ========================================================================
+    // Backoff Calculation
+    // ========================================================================
+
+    Test::case('backoff uses full jitter within bounds', function ($state) {
+        $job = new Job($state['pdo'], new FakeClock(), $state['table']);
+
+        // Use reflection to access backoffDelay
+        $reflection = new ReflectionClass($job);
+        $backoffMethod = $reflection->getMethod('backoffDelay');
+        $backoffMethod->setAccessible(true);
+
+        $config = [
+            'backoffBase' => 2,
+            'backoffCap' => 60,
+            'jitter' => 'full'
+        ];
+
+        // Test multiple attempts
+        $results = [];
+        for ($attempt = 1; $attempt <= 5; $attempt++) {
+            // Run multiple times to verify it's within bounds
+            for ($i = 0; $i < 20; $i++) {
+                $delay = $backoffMethod->invoke($job, $config, $attempt);
+                $max = min($config['backoffCap'], $config['backoffBase'] * (1 << max(0, $attempt - 1)));
+
+                Test::assertTrue($delay >= 0, "Delay should be >= 0, got $delay");
+                Test::assertTrue($delay <= $max, "Delay should be <= $max, got $delay for attempt $attempt");
+
+                $results[$attempt][] = $delay;
+            }
         }
 
-        if (str_contains($upper, 'ON DUPLICATE KEY UPDATE')) {
-            return <<<SQL
-INSERT INTO jobs (name, seen_at, priority) VALUES (:name, :seen, :priority)
-ON CONFLICT(name) DO UPDATE SET seen_at = excluded.seen_at, priority = excluded.priority;
-SQL;
+        // Verify progression: attempt 1 (0-2), attempt 2 (0-4), attempt 3 (0-8), etc.
+        Test::assertTrue(max($results[1]) <= 2);
+        Test::assertTrue(max($results[2]) <= 4);
+        Test::assertTrue(max($results[3]) <= 8);
+        Test::assertTrue(max($results[4]) <= 16);
+        Test::assertTrue(max($results[5]) <= 32);
+    });
+
+    Test::case('backoff respects cap limit', function ($state) {
+        $job = new Job($state['pdo'], new FakeClock(), $state['table']);
+
+        $reflection = new ReflectionClass($job);
+        $backoffMethod = $reflection->getMethod('backoffDelay');
+        $backoffMethod->setAccessible(true);
+
+        $config = [
+            'backoffBase' => 10,
+            'backoffCap' => 30,
+            'jitter' => 'full'
+        ];
+
+        // Attempt 10: base * 2^9 = 10 * 512 = 5120, but cap is 30
+        for ($i = 0; $i < 50; $i++) {
+            $delay = $backoffMethod->invoke($job, $config, 10);
+            Test::assertTrue($delay <= 30, "Delay should not exceed cap of 30, got $delay");
+            Test::assertTrue($delay >= 0, "Delay should be >= 0, got $delay");
         }
+    });
 
-        if (str_starts_with($upper, 'SELECT GET_LOCK')) {
-            return 'SELECT :name';
+    Test::case('backoff with jitter=none returns exact exponential delay', function ($state) {
+        $job = new Job($state['pdo'], new FakeClock(), $state['table']);
+
+        $reflection = new ReflectionClass($job);
+        $backoffMethod = $reflection->getMethod('backoffDelay');
+        $backoffMethod->setAccessible(true);
+
+        $config = [
+            'backoffBase' => 2,
+            'backoffCap' => 60,
+            'jitter' => 'none'
+        ];
+
+        // Test multiple attempts to verify deterministic behavior (no randomness)
+        $expectedDelays = [
+            1 => 2,   // 2 * 2^0 = 2
+            2 => 4,   // 2 * 2^1 = 4
+            3 => 8,   // 2 * 2^2 = 8
+            4 => 16,  // 2 * 2^3 = 16
+            5 => 32,  // 2 * 2^4 = 32
+            6 => 60,  // 2 * 2^5 = 64, but capped at 60
+            7 => 60,  // Still capped
+            10 => 60, // Still capped
+        ];
+
+        foreach ($expectedDelays as $attempt => $expectedDelay) {
+            // Call multiple times to verify it's always the same (no jitter)
+            for ($i = 0; $i < 5; $i++) {
+                $delay = $backoffMethod->invoke($job, $config, $attempt);
+                Test::assertEquals($expectedDelay, $delay,
+                    "Attempt $attempt should have delay of {$expectedDelay}s (no jitter), got {$delay}s");
+            }
         }
-
-        if (str_starts_with($upper, 'SELECT RELEASE_LOCK')) {
-            return 'SELECT :name';
-        }
-
-        if (str_contains($upper, 'NOW()')) {
-            $sql = str_ireplace('NOW()', "datetime('now')", $sql);
-        }
-
-        return $sql;
-    }
-}
-
+    });
+});

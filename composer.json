@@ -1,9 +1,9 @@
 {
-  "name": "cristianfacone/php-test",
+  "name": "cristianfacone/ajo",
   "type": "library",
   "description": "An extremely fast and lightweight micro framework for PHP",
   "keywords": [],
-  "homepage": "https://github.com/cristianfacone/php-test",
+  "homepage": "https://github.com/cristianfacone/php-ajo",
   "license": "MIT",
   "authors": [
     {
@@ -14,13 +14,10 @@
     }
   ],
   "require": {
-    "php": "^8.2",
+    "php": "^8.4",
     "ext-intl": "*",
     "ext-pcntl": "*",
     "ext-pdo_mysql": "*"
-  },
-  "require-dev": {
-    "phpunit/phpunit": "^11.0"
   },
   "autoload": {
     "psr-4": {
@@ -33,7 +30,7 @@
     }
   },
   "bin": [
-    "console"
+    "ajo"
   ],
   "minimum-stability": "stable",
   "prefer-stable": true

@@ -29,10 +29,10 @@ This is a **zero-dependency PHP micro-framework** that replicates features from 
 podman compose up -d
 
 # Run tests (custom test runner, NOT PHPUnit)
-podman compose exec app php console test
+podman compose exec app php ajo test
 
 # Run specific test suite
-podman compose exec app php console test --filter=Console
+podman compose exec app php ajo test --filter=Console
 ```
 
 For complete documentation, architecture details, and coding guidelines, see [CLAUDE.md](CLAUDE.md).

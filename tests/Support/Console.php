@@ -5,27 +5,32 @@ declare(strict_types=1);
 namespace Ajo\Tests\Support\Console;
 
 use Ajo\Console;
-use Ajo\Core\Console as CoreConsole;
 use ReflectionClass;
 
 /**
  * Executes a command and returns captured exit code, stdout and stderr.
  *
+ * Note: $cli should be created via Console::create() or be the result of Console::instance()
+ *
+ * @param object $cli Instance of ConsoleCore
  * @return array{0:int,1:string,2:string}
  */
 function dispatch(
-    CoreConsole $cli,
+    object $cli,
     string $command,
     array $arguments = [],
     bool $captureStreams = true
 ): array {
-    [$stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isInteractive, $withColors, $withTimestamps] = statics();
+    [$stdoutProp, $stderrProp, $interactive, $colorsEnabled, $timestampsEnabled] = statics();
 
-    $snapshot = snapshot($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isInteractive, $withColors, $withTimestamps, $cli);
+    $snapshot = snapshot($stdoutProp, $stderrProp, $interactive, $colorsEnabled, $timestampsEnabled, $cli);
 
-    $hadArgv = array_key_exists('argv', $GLOBALS);
-    $previousArgv = $hadArgv ? $GLOBALS['argv'] : null;
-    $GLOBALS['argv'] = array_merge(['console', $command], $arguments);
+    // Use $_SERVER['argv'] for better compatibility
+    $hadArgv = array_key_exists('argv', $_SERVER);
+    $previousArgv = $hadArgv ? $_SERVER['argv'] : null;
+    // Preserve custom binary name if already set, otherwise use 'console'
+    $bin = $hadArgv && isset($_SERVER['argv'][0]) ? $_SERVER['argv'][0] : 'console';
+    $_SERVER['argv'] = array_merge([$bin, $command], $arguments);
 
     $previous = Console::instance();
     Console::swap($cli);
@@ -47,11 +52,9 @@ function dispatch(
 
             $stdoutProp->setValue($cli, $stdout);
             $stderrProp->setValue($cli, $stderr);
-            $ownsStdout->setValue($cli, false);
-            $ownsStderr->setValue($cli, false);
-            $isInteractive->setValue($cli, false);
-            $withColors->setValue($cli, false);
-            $withTimestamps->setValue($cli, true);
+            $interactive->setValue($cli, false);
+            $colorsEnabled->setValue($cli, false);
+            $timestampsEnabled->setValue($cli, true);
 
             $exitCode = $cli->dispatch($command, $arguments);
         }
@@ -63,17 +66,18 @@ function dispatch(
 
         return [$exitCode, $output[0], $output[1]];
     } finally {
-        Console::swap($previous);
-
         if (is_resource($stdout)) fclose($stdout);
         if (is_resource($stderr)) fclose($stderr);
 
-        restore($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isInteractive, $withColors, $withTimestamps, $snapshot, $cli);
+        restore($stdoutProp, $stderrProp, $interactive, $colorsEnabled, $timestampsEnabled, $snapshot, $cli);
+
+        // Swap back AFTER restoring $cli, to ensure singleton state is not corrupted
+        Console::swap($previous);
 
         if ($hadArgv) {
-            $GLOBALS['argv'] = $previousArgv;
+            $_SERVER['argv'] = $previousArgv;
         } else {
-            unset($GLOBALS['argv']);
+            unset($_SERVER['argv']);
         }
     }
 }
@@ -81,51 +85,50 @@ function dispatch(
 /**
  * Executes a callback silencing Console's stdout/stderr.
  *
- * @return array{0:string,1:string} captured contents
+ * @param callable $callback Callback to execute
+ * @return array{0:string,1:string} captured contents [stdout, stderr]
  */
 function silence(callable $callback): array
 {
     $console = Console::instance();
 
-    [$stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isTTY, $withColors, $withTimestamps] = statics();
-    $snapshot = snapshot($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isTTY, $withColors, $withTimestamps, $console);
+    [$stdoutProp, $stderrProp, $interactive, $colorsEnabled, $timestampsEnabled] = statics();
+    $snapshot = snapshot($stdoutProp, $stderrProp, $interactive, $colorsEnabled, $timestampsEnabled, $console);
 
     $stdout = fopen('php://temp', 'w+');
     $stderr = fopen('php://temp', 'w+');
 
     $stdoutProp->setValue($console, $stdout);
     $stderrProp->setValue($console, $stderr);
-    $ownsStdout->setValue($console, false);
-    $ownsStderr->setValue($console, false);
-    $isTTY->setValue($console, false);
-    $withColors->setValue($console, false);
-    $withTimestamps->setValue($console, true);
+    $interactive->setValue($console, false);
+    $colorsEnabled->setValue($console, false);
+    $timestampsEnabled->setValue($console, true);
 
     try {
         $callback();
     } finally {
-        restore($stdoutProp, $stderrProp, $ownsStdout, $ownsStderr, $isTTY, $withColors, $withTimestamps, $snapshot, $console);
+        restore($stdoutProp, $stderrProp, $interactive, $colorsEnabled, $timestampsEnabled, $snapshot, $console);
     }
 
     return readAndClose([$stdout, $stderr]);
 }
 
 /**
- * @return array{0:\ReflectionProperty,1:\ReflectionProperty,2:\ReflectionProperty,3:\ReflectionProperty,4:\ReflectionProperty,5:\ReflectionProperty,6:\ReflectionProperty}
+ * @return array{0:\ReflectionProperty,1:\ReflectionProperty,2:\ReflectionProperty,3:\ReflectionProperty,4:\ReflectionProperty}
  */
 function statics(): array
 {
-    $reflection = new ReflectionClass(CoreConsole::class);
+    // Get ConsoleCore class name from Console facade
+    $coreClass = Console::create()::class;
+    $reflection = new ReflectionClass($coreClass);
 
     $stdout = $reflection->getProperty('stdout'); $stdout->setAccessible(true);
     $stderr = $reflection->getProperty('stderr'); $stderr->setAccessible(true);
-    $ownsStdout = $reflection->getProperty('ownsStdout'); $ownsStdout->setAccessible(true);
-    $ownsStderr = $reflection->getProperty('ownsStderr'); $ownsStderr->setAccessible(true);
-    $isInteractive = $reflection->getProperty('isInteractive'); $isInteractive->setAccessible(true);
-    $withColors = $reflection->getProperty('withColors'); $withColors->setAccessible(true);
-    $withTimestamps = $reflection->getProperty('withTimestamps'); $withTimestamps->setAccessible(true);
+    $interactive = $reflection->getProperty('interactive'); $interactive->setAccessible(true);
+    $colorsEnabled = $reflection->getProperty('colorsEnabled'); $colorsEnabled->setAccessible(true);
+    $timestampsEnabled = $reflection->getProperty('timestampsEnabled'); $timestampsEnabled->setAccessible(true);
 
-    return [$stdout, $stderr, $ownsStdout, $ownsStderr, $isInteractive, $withColors, $withTimestamps];
+    return [$stdout, $stderr, $interactive, $colorsEnabled, $timestampsEnabled];
 }
 
 /**
@@ -135,45 +138,37 @@ function statics(): array
 function snapshot(
     \ReflectionProperty $stdout,
     \ReflectionProperty $stderr,
-    \ReflectionProperty $ownsStdout,
-    \ReflectionProperty $ownsStderr,
-    \ReflectionProperty $isTTY,
-    \ReflectionProperty $withColors,
-    \ReflectionProperty $withTimestamps,
-    CoreConsole $console
+    \ReflectionProperty $interactive,
+    \ReflectionProperty $colorsEnabled,
+    \ReflectionProperty $timestampsEnabled,
+    object $console
 ): array {
     return [
         'stdout' => $stdout->getValue($console),
         'stderr' => $stderr->getValue($console),
-        'ownsStdout' => $ownsStdout->getValue($console),
-        'ownsStderr' => $ownsStderr->getValue($console),
-        'isTTY' => $isTTY->getValue($console),
-        'withColors' => $withColors->getValue($console),
-        'withTimestamps' => $withTimestamps->getValue($console),
+        'interactive' => $interactive->getValue($console),
+        'colorsEnabled' => $colorsEnabled->getValue($console),
+        'timestampsEnabled' => $timestampsEnabled->getValue($console),
     ];
 }
 
 /**
- * @param array{stdout:mixed,stderr:mixed,ownsStdout:mixed,ownsStderr:mixed,isTTY:mixed,withColors:mixed,withTimestamps:mixed} $snapshot
+ * @param array{stdout:mixed,stderr:mixed,interactive:mixed,colorsEnabled:mixed,timestampsEnabled:mixed} $snapshot
  */
 function restore(
     \ReflectionProperty $stdout,
     \ReflectionProperty $stderr,
-    \ReflectionProperty $ownsStdout,
-    \ReflectionProperty $ownsStderr,
-    \ReflectionProperty $isTTY,
-    \ReflectionProperty $withColors,
-    \ReflectionProperty $withTimestamps,
+    \ReflectionProperty $interactive,
+    \ReflectionProperty $colorsEnabled,
+    \ReflectionProperty $timestampsEnabled,
     array $snapshot,
-    CoreConsole $console
+    object $console
 ): void {
     $stdout->setValue($console, $snapshot['stdout']);
     $stderr->setValue($console, $snapshot['stderr']);
-    $ownsStdout->setValue($console, $snapshot['ownsStdout']);
-    $ownsStderr->setValue($console, $snapshot['ownsStderr']);
-    $isTTY->setValue($console, $snapshot['isTTY']);
-    $withColors->setValue($console, $snapshot['withColors']);
-    $withTimestamps->setValue($console, $snapshot['withTimestamps']);
+    $interactive->setValue($console, $snapshot['interactive']);
+    $colorsEnabled->setValue($console, $snapshot['colorsEnabled']);
+    $timestampsEnabled->setValue($console, $snapshot['timestampsEnabled']);
 }
 
 /**

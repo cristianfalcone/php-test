@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace Ajo\Tests\Unit\Router;
 
-use Ajo\Core\Router as CoreRouter;
+use Ajo\Router;
 use Ajo\Test;
 use RuntimeException;
 use Throwable;
 use InvalidArgumentException;
 
-final class TestHarness extends CoreRouter
+final class TestHarness extends Router
 {
     public static function create(
         ?callable $notFoundHandler = null,
@@ -67,17 +67,17 @@ Test::suite('Router', function () {
         $state['router'] = TestHarness::create();
     });
 
-    Test::it('should create new instance', function ($state) {
+    Test::case('creates new instance', function ($state) {
         Test::assertInstanceOf(TestHarness::class, $state['router']);
     });
 
-    Test::it('should throw when use called without handlers', function ($state) {
+    Test::case('throws when use called without handlers', function ($state) {
         Test::expectException(InvalidArgumentException::class, function () use ($state) {
             $state['router']->use('/path');
         });
     });
 
-    Test::it('should run global middleware before handler', function ($state) {
+    Test::case('runs global middleware before handler', function ($state) {
 
         $sequence = [];
 
@@ -97,7 +97,7 @@ Test::suite('Router', function () {
         Test::assertSame('done', $result);
     });
 
-    Test::it('should match prefixed middleware to formatted path', function ($state) {
+    Test::case('matches prefixed middleware to formatted path', function ($state) {
 
         $sequence = [];
 
@@ -123,7 +123,7 @@ Test::suite('Router', function () {
         Test::assertSame('ok', $result);
     });
 
-    Test::it('should continue pipeline when middleware calls next', function ($state) {
+    Test::case('continues pipeline when middleware calls next', function ($state) {
 
         $sequence = [];
 
@@ -143,7 +143,7 @@ Test::suite('Router', function () {
         Test::assertSame('ok', $result);
     });
 
-    Test::it('should handle exception with throwable parameter in error handler', function ($state) {
+    Test::case('handles exception with throwable parameter in error handler', function ($state) {
 
         $sequence = [];
 
@@ -162,7 +162,7 @@ Test::suite('Router', function () {
         Test::assertSame('recovered', $result);
     });
 
-    Test::it('should run error handler with two parameters', function ($state) {
+    Test::case('runs error handler with two parameters', function ($state) {
 
         $sequence = [];
 
@@ -181,19 +181,19 @@ Test::suite('Router', function () {
         Test::assertSame('handled', $result);
     });
 
-    Test::it('should reject invalid error handler signature', function ($state) {
+    Test::case('rejects invalid error handler signature', function ($state) {
         Test::expectException(InvalidArgumentException::class, function () use ($state) {
             $state['router']->exposeAdapt(function ($error, $next) {});
         });
     });
 
-    Test::it('should reject handlers with more than two parameters', function ($state) {
+    Test::case('rejects handlers with more than two parameters', function ($state) {
         Test::expectException(InvalidArgumentException::class, function () use ($state) {
             $state['router']->exposeAdapt(function ($a, $b, $c) {});
         });
     });
 
-    Test::it('should receive throwable in union type error handler', function ($state) {
+    Test::case('receives throwable in union type error handler', function ($state) {
 
         $sequence = [];
 
@@ -212,7 +212,7 @@ Test::suite('Router', function () {
         Test::assertSame('union-handled', $result);
     });
 
-    Test::it('should skip middleware execution when error propagates', function ($state) {
+    Test::case('skips middleware execution when error propagates', function ($state) {
 
         $sequence = [];
 
@@ -235,7 +235,7 @@ Test::suite('Router', function () {
         Test::assertSame('handled', $result);
     });
 
-    Test::it('should forward errors in zero parameter handler', function ($state) {
+    Test::case('forwards errors in zero parameter handler', function ($state) {
         $sequence = [];
 
         $thrower = $state['router']->exposeAdapt(function () {
@@ -257,11 +257,11 @@ Test::suite('Router', function () {
         Test::assertSame('handled', $result);
     });
 
-    Test::it('should return null when stack is empty', function ($state) {
+    Test::case('returns null when stack is empty', function ($state) {
         Test::assertNull($state['router']->runEmpty());
     });
 
-    Test::it('should rethrow error when unhandled', function ($state) {
+    Test::case('rethrows error when unhandled', function ($state) {
         Test::expectException(RuntimeException::class, function () use ($state) {
             $state['router']->runEmpty(new RuntimeException('unhandled'));
         });

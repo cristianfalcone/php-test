@@ -53,7 +53,7 @@ Http::get('/api/test-logging', function() {
     $logFile = fopen('/tmp/test-console.log', 'a');
 
     // Create Console instance with custom streams
-    $cli = \Ajo\Console::create();
+    $cli = Console::instance();
 
     // Manually set streams before logging
     $reflection = new \ReflectionClass($cli);
@@ -105,165 +105,205 @@ function renderLanding(): string
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #333;
-            line-height: 1.6;
+            font-family: 'IBM Plex Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: #f7f6f2;
+            color: #1f1f1f;
+            line-height: 1.7;
             min-height: 100vh;
         }
 
         .container {
-            max-width: 1200px;
+            max-width: 960px;
             margin: 0 auto;
-            padding: 2rem;
+            padding: 0 1.75rem 4rem;
         }
 
         header {
-            text-align: center;
-            padding: 4rem 0 3rem;
-            color: white;
+            padding: 4.5rem 0 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .brand {
+            font-size: 0.85rem;
+            letter-spacing: 0.28em;
+            text-transform: uppercase;
+            color: #7a776b;
         }
 
         h1 {
-            font-size: 3.5rem;
-            font-weight: 700;
-            margin-bottom: 0.5rem;
+            font-size: 3rem;
+            font-weight: 600;
             letter-spacing: -0.02em;
         }
 
         .subtitle {
-            font-size: 1.25rem;
-            opacity: 0.95;
-            font-weight: 300;
+            font-size: 1.125rem;
+            color: #4f4d44;
+            max-width: 520px;
         }
 
-        .badge {
-            display: inline-block;
-            background: rgba(255, 255, 255, 0.2);
-            padding: 0.5rem 1rem;
-            border-radius: 2rem;
-            font-size: 0.875rem;
-            margin-top: 1rem;
-            backdrop-filter: blur(10px);
+        .divider {
+            width: 64px;
+            height: 1px;
+            background: #cbc7ba;
         }
 
         .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1.5rem;
-            margin: 3rem 0;
+            list-style: none;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2.5rem;
+            padding: 2.75rem 0;
+            border-top: 1px solid #dcd8cb;
+            border-bottom: 1px solid #dcd8cb;
+            margin: 2rem 0 0;
         }
 
-        .stat-card {
-            background: rgba(255, 255, 255, 0.95);
-            padding: 2rem;
-            border-radius: 1rem;
-            text-align: center;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        .stats li {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
         }
 
         .stat-value {
-            font-size: 2rem;
-            font-weight: 700;
-            color: #667eea;
+            font-size: 1.75rem;
+            font-weight: 600;
         }
 
         .stat-label {
-            color: #666;
-            font-size: 0.875rem;
-            margin-top: 0.5rem;
+            font-size: 0.85rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #7a776b;
         }
 
-        .features {
+        .layout {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 1.5rem;
-            margin: 3rem 0;
+            gap: 3rem;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            align-items: start;
+            margin: 3.5rem 0;
         }
 
-        .feature-card {
-            background: white;
-            padding: 2rem;
-            border-radius: 1rem;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-            transition: transform 0.2s, box-shadow 0.2s;
+        .text-block {
+            display: flex;
+            flex-direction: column;
+            gap: 1.75rem;
         }
 
-        .feature-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
+        .text-block p {
+            font-size: 1rem;
+            color: #3f3d34;
         }
 
-        .feature-icon {
-            font-size: 2.5rem;
-            margin-bottom: 1rem;
+        .text-block ul {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
         }
 
-        .feature-name {
-            font-size: 1.25rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            color: #333;
+        .text-block li {
+            padding-left: 1.5rem;
+            position: relative;
+            color: #4f4d44;
         }
 
-        .feature-desc {
-            color: #666;
-            font-size: 0.95rem;
-        }
-
-        .cta {
-            text-align: center;
-            margin: 4rem 0 2rem;
-        }
-
-        .cta-button {
-            display: inline-block;
-            background: white;
-            color: #667eea;
-            padding: 1rem 2.5rem;
-            border-radius: 0.5rem;
-            text-decoration: none;
-            font-weight: 600;
-            font-size: 1.1rem;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-
-        .cta-button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.2);
+        .text-block li::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0.65rem;
+            width: 0.5rem;
+            height: 0.5rem;
+            border-radius: 50%;
+            background: #b5b09f;
         }
 
         .code-example {
-            background: rgba(0, 0, 0, 0.8);
-            color: #f8f8f2;
-            padding: 2rem;
-            border-radius: 1rem;
-            margin: 3rem 0;
-            font-family: 'Monaco', 'Courier New', monospace;
-            font-size: 0.9rem;
+            background: #fbfaf6;
+            border: 1px solid #dcd8cb;
+            border-radius: 16px;
+            padding: 1.75rem;
+            font-family: 'SFMono-Regular', 'Menlo', 'Monaco', 'Courier New', monospace;
+            font-size: 0.92rem;
+            color: #2b2b2b;
             overflow-x: auto;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
         }
 
         .code-example pre {
             margin: 0;
+            white-space: pre;
+        }
+
+        .features {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+            margin: 3rem 0 0;
+        }
+
+        .feature {
+            border-left: 2px solid #d0ccbf;
+            padding-left: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .feature h3 {
+            font-size: 1.15rem;
+            font-weight: 500;
+        }
+
+        .feature p {
+            color: #4f4d44;
+            font-size: 0.98rem;
+        }
+
+        .cta {
+            margin: 4rem 0 0;
+        }
+
+        .cta a {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1.75rem;
+            border-radius: 999px;
+            border: 1px solid #c9c4b4;
+            color: inherit;
+            text-decoration: none;
+            font-weight: 500;
+            letter-spacing: 0.04em;
+            transition: background 0.2s ease, border-color 0.2s ease;
+        }
+
+        .cta a:hover {
+            background: #efede5;
+            border-color: #bdb7a5;
         }
 
         footer {
-            text-align: center;
-            padding: 2rem 0;
-            color: rgba(255, 255, 255, 0.8);
-            font-size: 0.9rem;
+            padding: 3rem 0 1.5rem;
+            font-size: 0.85rem;
+            color: #7a776b;
         }
 
-        @media (max-width: 768px) {
+        @media (max-width: 640px) {
             h1 {
-                font-size: 2.5rem;
+                font-size: 2.4rem;
             }
 
-            .subtitle {
-                font-size: 1rem;
+            .stats {
+                gap: 1.75rem;
+            }
+
+            .layout {
+                gap: 2.5rem;
+                grid-template-columns: 1fr;
             }
         }
     </style>
@@ -271,73 +311,86 @@ function renderLanding(): string
 <body>
     <div class="container">
         <header>
-            <h1>Ajo</h1>
-            <p class="subtitle">Zero-Dependency PHP Micro-Framework</p>
-            <span class="badge">Pure PHP 8.4 • No Dependencies • Production Ready</span>
+            <div class="brand">Ajo Framework</div>
+            <h1>Lean PHP foundations for ambitious teams</h1>
+            <div class="divider"></div>
+            <p class="subtitle">
+                Ajo distills the ideas from large PHP ecosystems into a single, thoughtful micro-framework.
+                No dependencies, just modern PHP and careful engineering.
+            </p>
         </header>
 
-        <div class="stats" id="stats">
-            <div class="stat-card">
-                <div class="stat-value">~2,500</div>
-                <div class="stat-label">Lines of Code</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value">0</div>
-                <div class="stat-label">Dependencies</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value">8.4</div>
-                <div class="stat-label">PHP Version</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value">&gt;90%</div>
-                <div class="stat-label">Test Coverage</div>
-            </div>
-        </div>
+        <ul class="stats">
+            <li>
+                <span class="stat-value">~2,500</span>
+                <span class="stat-label">Lines of code</span>
+            </li>
+            <li>
+                <span class="stat-value">0</span>
+                <span class="stat-label">Dependencies</span>
+            </li>
+            <li>
+                <span class="stat-value">PHP 8.4</span>
+                <span class="stat-label">Runtime</span>
+            </li>
+            <li>
+                <span class="stat-value">&gt;90%</span>
+                <span class="stat-label">Coverage</span>
+            </li>
+        </ul>
 
-        <div class="code-example">
-            <pre><code>// Quick Start Example
+        <div class="layout">
+            <div class="text-block">
+                <p>
+                    Every subsystem ships in the box: HTTP routing, console tooling, job scheduling,
+                    a migration-aware database layer, and a fearless test runner. Everything is crafted
+                    for clarity and tuned for the realities of modern teams.
+                </p>
+                <ul>
+                    <li>Zero external packages and no runtime surprises.</li>
+                    <li>Facade-first APIs backed by composable core classes.</li>
+                    <li>Custom tooling that mirrors the ergonomics of frameworks you already know.</li>
+                </ul>
+            </div>
+            <div class="code-example">
+<pre><code>// Quick start
 use Ajo\Http;
+use Ajo\Container;
 
-Http::get('/', fn() => ['message' => 'Hello, World!']);
-Http::post('/users', fn() => ['created' => true]);
+Http::use(fn($next) => Container::has('auth') ? $next() : [
+    'status' => 401,
+    'error' => 'unauthorized',
+]);
 
-// With middleware
-Http::use('/api', fn($next) =>
-    Container::has('auth') ? $next() : ['error' => 'unauthorized', 'status' => 401]
-);
+Http::get('/', fn() => ['message' => 'Welcome to Ajo']);
 
 Http::dispatch();</code></pre>
+            </div>
         </div>
 
-        <div class="features" id="features">
-            <!-- Features will be loaded dynamically -->
+        <div class="features">
+            <div class="feature">
+                <h3>Modern PHP, no excess</h3>
+                <p>Property hooks, enums, readonly classes, and first-class callables put to work without third-party baggage.</p>
+            </div>
+            <div class="feature">
+                <h3>Composable console and HTTP layers</h3>
+                <p>Shared architecture patterns bridge CLI and web concerns, so tooling, middleware, and dependency management stay familiar.</p>
+            </div>
+            <div class="feature">
+                <h3>Jobs, migrations, and testing built in</h3>
+                <p>One command starts the scheduler, migrator, and bespoke test runner. No PHPUnit clone, just concise commands.</p>
+            </div>
         </div>
 
         <div class="cta">
-            <a href="https://github.com/yourusername/ajo" class="cta-button">View on GitHub</a>
+            <a href="https://github.com/yourusername/ajo">Explore the repository</a>
         </div>
 
         <footer>
-            <p>Built with simplicity, elegance, and modern PHP</p>
+            Crafted with restraint and purpose. Ajo keeps the essentials polished and in reach.
         </footer>
     </div>
-
-    <script>
-        // Load features dynamically
-        fetch('/api/features')
-            .then(res => res.json())
-            .then(data => {
-                const container = document.getElementById('features');
-                container.innerHTML = data.features.map(feature => `
-                    <div class="feature-card">
-                        <div class="feature-icon">${feature.icon}</div>
-                        <div class="feature-name">${feature.name}</div>
-                        <div class="feature-desc">${feature.description}</div>
-                    </div>
-                `).join('');
-            });
-    </script>
 </body>
 </html>
 HTML;
